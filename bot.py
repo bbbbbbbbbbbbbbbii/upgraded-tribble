@@ -62,6 +62,38 @@ class WelcomerBot(commands.Bot):
             activity=discord.Activity(type=discord.ActivityType.watching, name="new members join 👋")
         )
 
+    async def on_message(self, message: discord.Message):
+        # Always let prefix commands (e.g. "!wb ...") still work.
+        await self.process_commands(message)
+
+        if message.author.bot or message.guild is None:
+            return
+
+        # Respond whenever the bot is directly @mentioned (not part of a reply-ping,
+        # not @everyone/@here, and not just incidentally in a mention list).
+        is_direct_mention = self.user in message.mentions and not message.mention_everyone
+        if is_direct_mention:
+            content_without_mention = message.content
+            for mention_format in (f"<@{self.user.id}>", f"<@!{self.user.id}>"):
+                content_without_mention = content_without_mention.replace(mention_format, "").strip()
+
+            embed = discord.Embed(
+                title="👋 Hey there!",
+                description=(
+                    f"I'm **{self.user.name}** — I only use **slash commands** now.\n"
+                    "Type `/` and pick one of my commands, or run `/help` to see everything I can do. ✨"
+                ),
+                color=discord.Color.blurple(),
+            )
+            embed.set_footer(
+                text="Tip: /autosetup gets welcome, leave & DM messages configured in one step 🚀",
+                icon_url=self.user.display_avatar.url,
+            )
+            try:
+                await message.reply(embed=embed, mention_author=False)
+            except discord.HTTPException:
+                pass
+
     async def close(self):
         await db.close()
         await super().close()

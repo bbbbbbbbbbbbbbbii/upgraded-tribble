@@ -9,7 +9,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 DEV_GUILD_ID = os.getenv("DEV_GUILD_ID") or None
 
-DB_PATH = "welcomer.db"
+DB_PATH = os.getenv("DB_PATH", "welcomer.db")
 
 EMBED_COLOR = 0x2B2D31          # neutral discord dark
 SUCCESS_COLOR = 0x57F287
