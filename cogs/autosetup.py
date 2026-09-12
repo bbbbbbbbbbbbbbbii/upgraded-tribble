@@ -15,9 +15,10 @@ from config import (
     WELCOME_CHANNEL_NAME,
     LEAVE_CHANNEL_NAME,
 )
-from utils.embeds import brand_embed
+from utils.embeds import brand_embed, loading_embed
 from utils.placeholders import render
 from utils.image_gen import generate_card
+from cogs.autorole import _dangerous_perms_on
 
 
 class AutosetupConfirmView(discord.ui.View):
@@ -114,6 +115,21 @@ class Autosetup(commands.Cog):
             )
             return await interaction.response.send_message(embed=embed, ephemeral=True)
 
+        if autorole is not None:
+            dangerous = _dangerous_perms_on(autorole)
+            if dangerous:
+                embed = brand_embed(
+                    self.bot,
+                    title="🛑 Refused — that role is too dangerous to auto-assign",
+                    description=(
+                        f"{autorole.mention} has **{', '.join(dangerous)}**.\n"
+                        "I won't hand that to every new member on join. Pick a low-permission "
+                        "role, or set autorole separately later with `/autorole add`."
+                    ),
+                    color=ERROR_COLOR,
+                )
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+
         will_create_welcome = welcome_channel is None and not discord.utils.get(
             guild.text_channels, name=WELCOME_CHANNEL_NAME
         )
@@ -182,7 +198,8 @@ class Autosetup(commands.Cog):
     async def run_setup(self, interaction: discord.Interaction, plan: dict):
         guild = interaction.guild
         await interaction.followup.send(
-            embed=brand_embed(self.bot, description="⚙️ Setting things up..."), ephemeral=True
+            embed=loading_embed(self.bot, "⚙️ Setting up your welcomer — creating channels & roles..."),
+            ephemeral=True,
         )
 
         try:

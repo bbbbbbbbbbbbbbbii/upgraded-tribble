@@ -5,7 +5,7 @@ from discord.ext import commands
 
 from database import db
 from config import EMBED_COLOR, SUCCESS_COLOR, ERROR_COLOR
-from utils.embeds import brand_embed
+from utils.embeds import brand_embed, loading_embed
 
 
 class General(commands.Cog):
@@ -96,15 +96,37 @@ class General(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
     # ---------- /ping ----------
-    @app_commands.command(name="ping", description="Check the bot's latency")
+    @app_commands.command(name="ping", description="Check the bot's full latency breakdown")
     async def ping(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+        # Show a quick "beautiful loading" state first.
+        await interaction.response.send_message(embed=loading_embed(self.bot, "📡 Pinging everything..."))
+
+        ws_latency_ms = self.bot.latency * 1000  # heartbeat latency, always available
+
+        # API latency: time a real round trip to Discord's REST API.
+        api_start = time.perf_counter()
+        # A genuine REST round trip: fetch the message we just sent.
+        sent_message = await interaction.original_response()
+        api_latency_ms = (time.perf_counter() - api_start) * 1000
+
+        # Database latency: time a real round trip to the DB.
+        db_start = time.perf_counter()
+        await db.get_settings(interaction.guild_id)
+        db_latency_ms = (time.perf_counter() - db_start) * 1000
+
+        total_ms = ws_latency_ms + api_latency_ms + db_latency_ms
+
         embed = brand_embed(
             self.bot,
-            description=f"🏓 Pong! Websocket: **{round(self.bot.latency * 1000)}ms**",
+            title="🏓 Pong!",
             color=EMBED_COLOR,
         )
-        await interaction.followup.send(embed=embed)
+        embed.add_field(name="🔌 Websocket", value=f"`{ws_latency_ms:.5f}ms`", inline=True)
+        embed.add_field(name="🌐 Discord API", value=f"`{api_latency_ms:.5f}ms`", inline=True)
+        embed.add_field(name="🗄️ Database", value=f"`{db_latency_ms:.5f}ms`", inline=True)
+        embed.add_field(name="⏱️ Total", value=f"`{total_ms:.5f}ms`", inline=False)
+
+        await sent_message.edit(embed=embed)
 
     # ---------- /help ----------
     @app_commands.command(name="help", description="List all commands the welcomer bot provides")
@@ -170,7 +192,8 @@ class General(commands.Cog):
             ),
             inline=False,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Not ephemeral: everyone in the channel should be able to see the command list.
+        await interaction.response.send_message(embed=embed)
 
     # ---------- error handling for this cog's app commands ----------
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):

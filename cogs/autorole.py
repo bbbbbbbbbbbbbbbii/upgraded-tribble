@@ -6,6 +6,28 @@ from database import db
 from config import EMBED_COLOR, SUCCESS_COLOR, ERROR_COLOR
 from utils.embeds import brand_embed
 
+# Permissions that would let a brand-new member seize control of (or damage) the
+# server the moment they join — never allowed on an autorole.
+DANGEROUS_PERMS = (
+    "administrator",
+    "manage_guild",
+    "manage_roles",
+    "manage_channels",
+    "manage_webhooks",
+    "manage_messages",
+    "manage_nicknames",
+    "manage_expressions",
+    "kick_members",
+    "ban_members",
+    "moderate_members",
+    "mention_everyone",
+)
+
+
+def _dangerous_perms_on(role: discord.Role) -> list[str]:
+    perms = role.permissions
+    return [p.replace("_", " ") for p in DANGEROUS_PERMS if getattr(perms, p, False)]
+
 
 class Autorole(commands.Cog):
     """Automatically assigns one or more roles to members when they join."""
@@ -24,6 +46,21 @@ class Autorole(commands.Cog):
                 title="❌ Can't use that role",
                 description="That role is higher than or equal to my top role. "
                             "Move my role above it in Server Settings → Roles.",
+                color=ERROR_COLOR,
+            )
+            return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        dangerous = _dangerous_perms_on(role)
+        if dangerous:
+            embed = brand_embed(
+                self.bot,
+                title="🛑 Refused — that role is too dangerous to auto-assign",
+                description=(
+                    f"{role.mention} has **{', '.join(dangerous)}**.\n"
+                    "Giving that to every new member on join is a serious security risk "
+                    "(raid/nuke potential), so I won't set it as an autorole.\n\n"
+                    "Create a separate, low-permission role for autorole instead."
+                ),
                 color=ERROR_COLOR,
             )
             return await interaction.response.send_message(embed=embed, ephemeral=True)
