@@ -27,6 +27,32 @@ images (avatar + name + member count), similar to popular welcomer bots.
   timestamp in the footer, like a polished commercial bot
 - **Clean slash-command UI** with grouped commands (`/welcome`, `/leave`, `/autorole`)
 - **Per-guild SQLite storage** — settings persist across restarts, isolated per server
+- **Mention commands** — say `@Welcomer ping`, `@Welcomer help`, or
+  `@Welcomer autorole add @Role` and the bot responds directly, same as the
+  slash version (works alongside `/ping`, `/help`, `/autorole`, not instead of)
+- **Music player (mention-only, no slash commands)** — `@Welcomer play <song>`
+  (or `p`), `skip`, `stop`, `pause`, `resume`, `queue`, `nowplaying` (`np`),
+  `join`, `leave`, `volume <0-150>`, and `24/7` mode to stay connected with an
+  empty queue
+
+## Extra setup for mention-commands & music
+
+1. **Enable "Message Content Intent"** — Discord Developer Portal → your app →
+   Bot → scroll to Privileged Gateway Intents → turn on **Message Content
+   Intent**. Without this, the bot can't read `@Welcomer ping`-style messages
+   at all (slash commands still work fine either way).
+2. **Install ffmpeg on your VPS** (music needs it to stream audio):
+   ```
+   sudo apt update && sudo apt install -y ffmpeg
+   ```
+3. **Install the new Python dependencies**:
+   ```
+   pip install -r requirements.txt
+   ```
+   (adds `yt-dlp` for finding/streaming songs and `PyNaCl` for voice support)
+4. Make sure the bot's role has **Connect** and **Speak** permissions in
+   whatever voice channels you want it to join.
+
 
 ## Project Structure
 

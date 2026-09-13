@@ -27,6 +27,8 @@ log = logging.getLogger("welcomer")
 
 INTENTS = discord.Intents.default()
 INTENTS.members = True  # required for on_member_join / on_member_remove / autorole
+INTENTS.message_content = True  # required to read "@Bot ping" style mention-commands
+INTENTS.voice_states = True  # required for the music cog (join/play/24-7)
 
 EXTENSIONS = [
     "cogs.welcome",
@@ -34,12 +36,15 @@ EXTENSIONS = [
     "cogs.autorole",
     "cogs.autosetup",
     "cogs.general",
+    "cogs.mention_commands",
+    "cogs.music",
 ]
 
 
 class WelcomerBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix="!wb ", intents=INTENTS, help_command=None)
+        # Mention-prefix (e.g. "@Welcomer ping") always works; "!wb " still works too.
+        super().__init__(command_prefix=commands.when_mentioned_or("!wb "), intents=INTENTS, help_command=None)
 
     async def setup_hook(self):
         await db.connect()
@@ -63,25 +68,25 @@ class WelcomerBot(commands.Bot):
         )
 
     async def on_message(self, message: discord.Message):
-        # Always let prefix commands (e.g. "!wb ...") still work.
-        await self.process_commands(message)
-
         if message.author.bot or message.guild is None:
             return
 
-        # Respond whenever the bot is directly @mentioned (not part of a reply-ping,
-        # not @everyone/@here, and not just incidentally in a mention list).
+        ctx = await self.get_context(message)
+        if ctx.valid:
+            # A real "@Bot <command>" or "!wb <command>" — run it.
+            await self.invoke(ctx)
+            return
+
+        # Mentioned, but not a recognized command — give a friendly nudge instead
+        # of silently ignoring them.
         is_direct_mention = self.user in message.mentions and not message.mention_everyone
         if is_direct_mention:
-            content_without_mention = message.content
-            for mention_format in (f"<@{self.user.id}>", f"<@!{self.user.id}>"):
-                content_without_mention = content_without_mention.replace(mention_format, "").strip()
-
             embed = discord.Embed(
                 title="👋 Hey there!",
                 description=(
-                    f"I'm **{self.user.name}** — I only use **slash commands** now.\n"
-                    "Type `/` and pick one of my commands, or run `/help` to see everything I can do. ✨"
+                    f"I'm **{self.user.name}**! Try mentioning me with a command, like:\n"
+                    f"`@{self.user.name} help` · `@{self.user.name} ping` · `@{self.user.name} play <song>`\n\n"
+                    "Or use my slash commands — type `/` and pick one. ✨"
                 ),
                 color=discord.Color.blurple(),
             )
@@ -120,6 +125,27 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
             await interaction.response.send_message(embed=embed, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    """Handles errors from mention-prefix commands like '@Bot play ...'."""
+    if isinstance(error, commands.CommandNotFound):
+        return  # already handled by the friendly nudge in on_message
+    elif isinstance(error, commands.MissingPermissions):
+        msg = "❌ You need **Manage Server** permission to use this command."
+    elif isinstance(error, commands.MissingRequiredArgument):
+        msg = f"❌ Missing something — usage: `{ctx.prefix}{ctx.command} {ctx.command.signature}`"
+    elif isinstance(error, commands.BadArgument):
+        msg = "❌ I couldn't understand one of those arguments."
+    else:
+        log.exception("Unhandled command error", exc_info=error)
+        msg = "❌ Something went wrong running that command."
+    embed = discord.Embed(description=msg, color=ERROR_COLOR)
+    try:
+        await ctx.reply(embed=embed, mention_author=False)
     except discord.HTTPException:
         pass
 
