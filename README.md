@@ -30,28 +30,65 @@ images (avatar + name + member count), similar to popular welcomer bots.
 - **Mention commands** — say `@Welcomer ping`, `@Welcomer help`, or
   `@Welcomer autorole add @Role` and the bot responds directly, same as the
   slash version (works alongside `/ping`, `/help`, `/autorole`, not instead of)
-- **Music player (mention-only, no slash commands)** — `@Welcomer play <song>`
-  (or `p`), `skip`, `stop`, `pause`, `resume`, `queue`, `nowplaying` (`np`),
-  `join`, `leave`, `volume <0-150>`, and `24/7` mode to stay connected with an
-  empty queue
+- **Music player — pure Lavalink (mention-only, no slash commands)** —
+  `@Welcomer play <song>` (or `p`), `skip`, `stop`, `pause`, `resume`, `loop`,
+  `shuffle`, `autoplay`, `queue`, `nowplaying` (`np`), `join`, `leave`,
+  `volume <0-150>`, `24/7` mode, plus a live Now Playing card with buttons and
+  a filter dropdown (Bass Boost / Nightcore / Vaporwave / 8D). All searching,
+  decoding, and streaming happens on the Lavalink node — **no yt-dlp and no
+  ffmpeg run on the bot's own host.**
 
 ## Extra setup for mention-commands & music
 
 1. **Enable "Message Content Intent"** — Discord Developer Portal → your app →
    Bot → scroll to Privileged Gateway Intents → turn on **Message Content
    Intent**. Without this, the bot can't read `@Welcomer ping`-style messages
-   at all (slash commands still work fine either way).
-2. **Install ffmpeg on your VPS** (music needs it to stream audio):
-   ```
-   sudo apt update && sudo apt install -y ffmpeg
-   ```
-3. **Install the new Python dependencies**:
+   at all (slash commands still work fine either way). This is the #1 reason
+   mention-commands appear "broken" — the bot silently can't see the message.
+2. **Run a Lavalink v4 node.** This is a separate small Java server the bot
+   talks to over HTTP/WebSocket — it does the actual audio work.
+   - Requires **Java 17+**.
+   - Download the latest `Lavalink.jar` from the official releases:
+     https://github.com/lavalink-devs/Lavalink/releases
+   - Next to the jar, create an `application.yml` (minimal example):
+     ```yaml
+     server:
+       port: 2333
+     lavalink:
+       server:
+         password: "youshallnotpass"
+         sources:
+           youtube: true
+           soundcloud: true
+           bandcamp: true
+           twitch: true
+           vimeo: true
+           http: true
+     ```
+     > Note: as of Lavalink v4, YouTube playback needs the community
+     > `youtube-source` plugin (add it under a `plugins:` block in
+     > `application.yml` per that plugin's README) since built-in YouTube
+     > support was removed upstream for ToS reasons. SoundCloud works
+     > out of the box and is a solid fallback.
+   - Start it: `java -jar Lavalink.jar`
+   - You can self-host this on the same VPS as the bot, or use a separate
+     machine, or (for quick testing only) a public Lavalink node — public
+     nodes are unreliable and shouldn't be used for anything but trying
+     things out.
+3. **Point the bot at your node** — in `.env`, set `LAVALINK_HOST`,
+   `LAVALINK_PORT`, `LAVALINK_PASSWORD` (and `LAVALINK_SECURE=true` if it's
+   behind HTTPS) to match your `application.yml`.
+4. **Install the Python dependencies**:
    ```
    pip install -r requirements.txt
    ```
-   (adds `yt-dlp` for finding/streaming songs and `PyNaCl` for voice support)
-4. Make sure the bot's role has **Connect** and **Speak** permissions in
+   (this installs `wavelink`, the Lavalink client — no `yt-dlp`/`PyNaCl` needed)
+5. Make sure the bot's role has **Connect** and **Speak** permissions in
    whatever voice channels you want it to join.
+
+If the Lavalink node isn't reachable, the bot still starts fine — every music
+command just replies "Music isn't available right now" instead of failing
+silently.
 
 
 ## Project Structure
@@ -72,7 +109,9 @@ welcomer-bot/
     ├── leave.py             # on_member_remove + /leave commands
     ├── autorole.py          # /autorole commands
     ├── autosetup.py         # /autosetup guided one-command setup
-    └── general.py           # /config, /embed-color, /stats, /ping, /help
+    ├── general.py           # /config, /embed-color, /stats, /ping, /help
+    ├── mention_commands.py  # @Bot ping/help/autorole (mirrors slash versions)
+    └── music.py             # @Bot play/skip/stop/... — Lavalink via wavelink
 ```
 
 ## Setup
@@ -143,6 +182,22 @@ All configuration commands require the **Manage Server** permission.
 | `/autorole remove <@role>` | Remove a role from autorole |
 | `/autorole list` | List current autoroles (anyone can run) |
 | `/autorole clear` | Remove all autoroles |
+
+### Music (mention-only — `@Welcomer <command>`, not `/`)
+| Command | Description |
+|---|---|
+| `play <song/link>` (`p`) | Play now or add to the queue (Lavalink search + direct links) |
+| `skip` (`s`) | Skip the current track |
+| `stop` | Stop and clear the queue |
+| `pause` / `resume` | Pause/resume playback |
+| `loop` | Cycle loop mode: Off → Track → Queue |
+| `shuffle` | Shuffle the queue |
+| `autoplay` | Toggle auto-queuing similar tracks when the queue ends |
+| `queue` (`q`) | Show the current queue |
+| `nowplaying` (`np`) | Show the Now Playing card with buttons + filter dropdown |
+| `join` / `leave` | Voice channel control |
+| `24/7` | Stay connected even with an empty queue |
+| `volume <0-150>` | Set playback volume |
 
 ### General
 | Command | Description |

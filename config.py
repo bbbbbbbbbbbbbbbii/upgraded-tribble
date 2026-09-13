@@ -11,6 +11,15 @@ DEV_GUILD_ID = os.getenv("DEV_GUILD_ID") or None
 
 DB_PATH = os.getenv("DB_PATH", "welcomer.db")
 
+# ---- Lavalink (music) ----
+# Point this at any Lavalink v4 node — self-hosted or a trusted public one.
+# The bot itself never touches yt-dlp/ffmpeg; the Lavalink server does all
+# searching/decoding and streams audio straight into the voice channel.
+LAVALINK_HOST = os.getenv("LAVALINK_HOST", "127.0.0.1")
+LAVALINK_PORT = int(os.getenv("LAVALINK_PORT", "2333"))
+LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
+LAVALINK_SECURE = os.getenv("LAVALINK_SECURE", "false").lower() in ("1", "true", "yes")
+
 EMBED_COLOR = 0x2B2D31          # neutral discord dark
 SUCCESS_COLOR = 0x57F287
 ERROR_COLOR = 0xED4245

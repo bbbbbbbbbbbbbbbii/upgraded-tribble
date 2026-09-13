@@ -18,8 +18,17 @@ import logging
 import discord
 from discord import app_commands
 from discord.ext import commands
+import wavelink
 
-from config import TOKEN, DEV_GUILD_ID, ERROR_COLOR
+from config import (
+    TOKEN,
+    DEV_GUILD_ID,
+    ERROR_COLOR,
+    LAVALINK_HOST,
+    LAVALINK_PORT,
+    LAVALINK_PASSWORD,
+    LAVALINK_SECURE,
+)
 from database import db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -48,6 +57,25 @@ class WelcomerBot(commands.Bot):
 
     async def setup_hook(self):
         await db.connect()
+
+        # Connect to the Lavalink node used for all music playback. If the
+        # node isn't up yet, don't crash the whole bot — the music cog checks
+        # `wavelink.Pool.nodes` before doing anything and replies with a clear
+        # "music isn't available right now" message instead.
+        scheme = "https" if LAVALINK_SECURE else "http"
+        node = wavelink.Node(
+            uri=f"{scheme}://{LAVALINK_HOST}:{LAVALINK_PORT}",
+            password=LAVALINK_PASSWORD,
+        )
+        try:
+            await wavelink.Pool.connect(nodes=[node], client=self)
+        except Exception:
+            log.exception(
+                "Could not connect to the Lavalink node at %s:%s — music commands "
+                "won't work until it's reachable. See README for Lavalink setup.",
+                LAVALINK_HOST, LAVALINK_PORT,
+            )
+
         for ext in EXTENSIONS:
             await self.load_extension(ext)
             log.info(f"Loaded extension: {ext}")
