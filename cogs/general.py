@@ -66,17 +66,21 @@ def build_help_embed(bot: commands.Bot, mention_style: bool = False) -> discord.
         inline=False,
     )
     embed.add_field(
-        name="🎵 Music (mention-only, no slash)",
+        name="🎵 Music — Lavalink, mention-only, no slash",
         value=(
-            f"`@{bot.user.name} play <song>` (or `p`) — play/queue a song\n"
-            f"`@{bot.user.name} skip` — skip the current song\n"
+            f"`@{bot.user.name} play <song>` (or `p`) — play/queue a song or playlist\n"
+            f"`@{bot.user.name} skip` (or `s`) — skip the current song\n"
             f"`@{bot.user.name} stop` — stop and clear the queue\n"
             f"`@{bot.user.name} pause` / `resume` — pause/resume\n"
-            f"`@{bot.user.name} queue` — show the queue\n"
-            f"`@{bot.user.name} nowplaying` (or `np`) — show current song\n"
+            f"`@{bot.user.name} loop` — cycle Off → Track → Queue\n"
+            f"`@{bot.user.name} shuffle` — shuffle the queue\n"
+            f"`@{bot.user.name} autoplay` — toggle auto-queuing similar tracks\n"
+            f"`@{bot.user.name} queue` (or `q`) — show the queue\n"
+            f"`@{bot.user.name} nowplaying` (or `np`) — show current song + controls\n"
             f"`@{bot.user.name} join` / `leave` — voice channel control\n"
             f"`@{bot.user.name} 24/7` — toggle staying connected 24/7\n"
-            f"`@{bot.user.name} volume <0-150>` — set volume"
+            f"`@{bot.user.name} volume <0-150>` — set volume\n"
+            "Also fully controllable from the buttons + filter dropdown on the Now Playing card."
         ),
         inline=False,
     )

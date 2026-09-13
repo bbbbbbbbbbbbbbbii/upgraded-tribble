@@ -1,52 +1,34 @@
 """
 Music playback — mention-command only (e.g. "@Welcomer play imagine dragons"),
-with a stylish interactive "Now Playing" card (buttons + a filter dropdown),
-deliberately NOT registered as slash commands per the requested design.
+backed entirely by Lavalink through the `wavelink` client library.
 
-Requires:
-  - the 'ffmpeg' binary installed on the host (apt install ffmpeg on the VPS)
-  - yt-dlp and PyNaCl (see requirements.txt)
-  - the bot's Voice States intent enabled (already set in bot.py)
+There is NO yt-dlp and NO ffmpeg on the bot's own host. Every search,
+download, and audio filter runs on the Lavalink node itself; the bot only
+sends control frames (play/pause/volume/filters) and Discord relays the
+resulting audio. See README.md → "Music (Lavalink) setup" for how to point
+this at a Lavalink v4 server.
 
-Note on the filter dropdown: changing a filter restarts the current track
-from the beginning with that ffmpeg audio filter applied — there's no
-seek-and-reapply, so switching filters mid-song will replay it from 0:00.
-"Autoplay" is a simple approximation (searches for something similar to the
-last track when the queue runs out) — not YouTube's actual Mix/Radio algorithm.
+Same interactive "Now Playing" card as before (buttons + a filter dropdown),
+still deliberately NOT registered as slash commands per the requested design
+— everything here is a mention/prefix command: "@Welcomer play ...".
 """
 import asyncio
-import functools
 import logging
 import random
-import time
 
 import discord
 from discord.ext import commands
-import yt_dlp as youtube_dl
+import wavelink
 
 from config import SUCCESS_COLOR, ERROR_COLOR, EMBED_COLOR
 from utils.embeds import brand_embed, loading_embed
 
 log = logging.getLogger("welcomer.music")
-youtube_dl.utils.bug_reports_message = lambda: ""
 
-YDL_OPTS = {
-    "format": "bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "default_search": "ytsearch",
-    "source_address": "0.0.0.0",
-}
 IDLE_DISCONNECT_SECONDS = 180
 
-FILTERS = {
-    "none": None,
-    "bassboost": "bass=g=20",
-    "nightcore": "asetrate=44100*1.25,aresample=44100",
-    "vaporwave": "asetrate=44100*0.8,aresample=44100,atempo=1.15",
-    "8d": "apulsator=hz=0.08",
-}
+# Lavalink-native filters (applied server-side, no restart-from-0 needed —
+# unlike the old ffmpeg approach, Lavalink re-applies filters live).
 FILTER_LABELS = {
     "none": "🚫 None",
     "bassboost": "🔊 Bass Boost",
@@ -56,327 +38,286 @@ FILTER_LABELS = {
 }
 
 
-def _extract(query: str) -> dict:
-    """Blocking — always run this in an executor."""
-    with youtube_dl.YoutubeDL(YDL_OPTS) as ydl:
-        info = ydl.extract_info(query, download=False)
-        if "entries" in info:
-            info = info["entries"][0]
-        return info
+def build_filters(key: str) -> wavelink.Filters:
+    """Fresh Filters object for the given preset. 'none' clears everything."""
+    filters = wavelink.Filters()
+    if key == "bassboost":
+        filters.equalizer.set(bands=[
+            {"band": 0, "gain": 0.30},
+            {"band": 1, "gain": 0.25},
+            {"band": 2, "gain": 0.20},
+            {"band": 3, "gain": 0.10},
+        ])
+    elif key == "nightcore":
+        filters.timescale.set(pitch=1.2, speed=1.15, rate=1.0)
+    elif key == "vaporwave":
+        filters.timescale.set(pitch=0.8, speed=0.85, rate=1.0)
+    elif key == "8d":
+        filters.rotation.set(rotation_hz=0.2)
+    return filters
 
 
-def _format_duration(seconds) -> str:
-    if not seconds:
+def _format_duration(ms) -> str:
+    if not ms:
         return "--:--"
-    seconds = int(seconds)
+    seconds = int(ms // 1000)
     m, s = divmod(seconds, 60)
     h, m = divmod(m, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def _progress_bar(elapsed: float, total, length: int = 18) -> str:
-    if not total:
+def _progress_bar(elapsed_ms: float, total_ms, length: int = 18) -> str:
+    if not total_ms:
         return "🔴 `LIVE`"
-    ratio = max(0.0, min(elapsed / total, 1.0))
+    ratio = max(0.0, min(elapsed_ms / total_ms, 1.0))
     filled = int(ratio * length)
     bar = "▬" * filled + "🔘" + "▬" * (length - filled)
-    return f"`{_format_duration(elapsed)}` {bar} `{_format_duration(total)}`"
+    return f"`{_format_duration(elapsed_ms)}` {bar} `{_format_duration(total_ms)}`"
 
 
-class Track:
-    def __init__(self, title, webpage_url, duration, requester, thumbnail=None, uploader=None):
-        self.title = title
-        self.webpage_url = webpage_url
-        self.duration = duration
-        self.requester = requester
-        self.thumbnail = thumbnail
-        self.uploader = uploader or "Unknown artist"
+def _requester(track: wavelink.Playable):
+    """We stash the requester on track.extras when queueing (see play())."""
+    try:
+        return track.extras.requester
+    except AttributeError:
+        return None
 
 
-class GuildMusicState:
-    def __init__(self, bot: commands.Bot, guild: discord.Guild):
-        self.bot = bot
-        self.guild = guild
-        self.queue: list[Track] = []
-        self.current: Track | None = None
-        self.voice_client: discord.VoiceClient | None = None
-        self.volume: float = 1.0
-        self.stay_247: bool = False
+class LavalinkPlayer(wavelink.Player):
+    """wavelink.Player subclass carrying the extra state our UI/commands need."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.text_channel: discord.abc.Messageable | None = None
-        self.next_song_event = asyncio.Event()
-        self.task = bot.loop.create_task(self._player_loop())
-
-        # Player-card state
-        self.loop_mode = "off"       # "off" | "track" | "queue"
-        self.autoplay = False
-        self.audio_filter = "none"
-        self.started_at: float | None = None
+        self.audio_filter: str = "none"
+        self.stay_247: bool = False
         self.now_playing_message: discord.Message | None = None
-        self.restart_requested = False  # set true to replay current track (e.g. after a filter change)
+        self._idle_task: asyncio.Task | None = None
 
-    def is_idle(self) -> bool:
-        return not (self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()))
+    def cancel_idle_timer(self):
+        if self._idle_task and not self._idle_task.done():
+            self._idle_task.cancel()
+        self._idle_task = None
 
-    def elapsed(self) -> float:
-        return time.time() - self.started_at if self.started_at else 0.0
-
-    def enqueue(self, track: Track):
-        was_idle = self.is_idle()
-        self.queue.append(track)
-        if was_idle:
-            self.next_song_event.set()
-
-    def ffmpeg_options(self) -> dict:
-        af = FILTERS.get(self.audio_filter)
-        return {
-            "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-            "options": f"-vn -af {af}" if af else "-vn",
-        }
-
-    async def _find_autoplay_track(self) -> "Track | None":
-        if not self.current:
-            return None
-        loop = asyncio.get_event_loop()
-        try:
-            info = await loop.run_in_executor(
-                None, functools.partial(_extract, f"ytsearch1:{self.current.uploader} {self.current.title} similar")
-            )
-        except Exception:
-            return None
-        if not info or info.get("webpage_url") == self.current.webpage_url:
-            return None
-        return Track(
-            title=info.get("title", "Unknown title"),
-            webpage_url=info.get("webpage_url"),
-            duration=info.get("duration"),
-            requester=self.bot.user,
-            thumbnail=info.get("thumbnail"),
-            uploader=info.get("uploader"),
-        )
-
-    async def _player_loop(self):
-        while True:
-            self.next_song_event.clear()
-            self.restart_requested = False
-
-            if not self.queue:
-                if self.autoplay and self.current:
-                    next_track = await self._find_autoplay_track()
-                    if next_track:
-                        self.queue.append(next_track)
-
-            if not self.queue:
-                if self.stay_247:
-                    await asyncio.sleep(1)
-                    continue
-                try:
-                    await asyncio.wait_for(self.next_song_event.wait(), timeout=IDLE_DISCONNECT_SECONDS)
-                    continue
-                except asyncio.TimeoutError:
-                    if self.voice_client and not self.queue:
-                        try:
-                            await self.voice_client.disconnect()
-                        except Exception:
-                            pass
-                        self.voice_client = None
-                    continue
-
-            self.current = self.queue.pop(0)
-            await self._play_current()
-            await self.next_song_event.wait()
-
-            if self.restart_requested and self.current:
-                self.queue.insert(0, self.current)
-            elif self.loop_mode == "track" and self.current:
-                self.queue.insert(0, self.current)
-            elif self.loop_mode == "queue" and self.current:
-                self.queue.append(self.current)
-            self.current = None
-
-    async def _play_current(self):
-        try:
-            loop = asyncio.get_event_loop()
-            data = await loop.run_in_executor(None, functools.partial(_extract, self.current.webpage_url))
-            stream_url = data["url"]
-        except Exception:
-            log.exception("Failed to resolve stream for %s", self.current.title)
-            if self.text_channel:
-                await self.text_channel.send(
-                    embed=brand_embed(self.bot, description=f"⚠️ Skipping **{self.current.title}** — couldn't load it.", color=ERROR_COLOR)
-                )
-            self.current = None
-            self.next_song_event.set()
+    def start_idle_timer(self):
+        self.cancel_idle_timer()
+        if self.stay_247:
             return
+        self._idle_task = asyncio.get_event_loop().create_task(self._idle_disconnect())
 
-        if not self.voice_client or not self.voice_client.is_connected():
-            self.current = None
-            self.next_song_event.set()
+    async def _idle_disconnect(self):
+        try:
+            await asyncio.sleep(IDLE_DISCONNECT_SECONDS)
+        except asyncio.CancelledError:
             return
-
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(stream_url, **self.ffmpeg_options()), volume=self.volume
-        )
-
-        def _after(err, guild_id=self.guild.id):
-            if err:
-                log.error("Player error in guild %s: %s", guild_id, err)
-            self.bot.loop.call_soon_threadsafe(self.next_song_event.set)
-
-        self.started_at = time.time()
-        self.voice_client.play(source, after=_after)
-
-        if self.text_channel:
-            view = MusicControls(self.bot.get_cog("Music"), self)
-            embed = build_now_playing_embed(self.bot, self)
-            try:
-                self.now_playing_message = await self.text_channel.send(embed=embed, view=view)
-            except discord.HTTPException:
-                self.now_playing_message = None
+        if self.stay_247 or self.playing or not self.queue.is_empty:
+            return
+        try:
+            await self.disconnect()
+        except Exception:
+            pass
 
 
-def build_now_playing_embed(bot: commands.Bot, state: GuildMusicState) -> discord.Embed:
-    t = state.current
-    loop_labels = {"off": "Off", "track": "Track", "queue": "Queue"}
+def build_now_playing_embed(bot: commands.Bot, player: LavalinkPlayer) -> discord.Embed:
+    t = player.current
+    loop_labels = {
+        wavelink.QueueMode.normal: "Off",
+        wavelink.QueueMode.loop: "Track",
+        wavelink.QueueMode.loop_all: "Queue",
+    }
+    autoplay_label = "On" if player.autoplay is wavelink.AutoPlayMode.enabled else "Off"
+    requester = _requester(t)
     embed = discord.Embed(
         title=f"🎶 {t.title}",
+        url=t.uri,
         description=(
-            f"*by {t.uploader}*\n\n"
-            f"{_progress_bar(state.elapsed(), t.duration)}\n\n"
-            f"**Loop:** {loop_labels[state.loop_mode]} · "
-            f"**Volume:** {int(state.volume * 100)}% · "
-            f"**Filter:** {FILTER_LABELS[state.audio_filter]}"
+            f"*by {t.author or 'Unknown artist'}*\n\n"
+            f"{_progress_bar(player.position, t.length)}\n\n"
+            f"**Loop:** {loop_labels.get(player.queue.mode, 'Off')} · "
+            f"**Volume:** {player.volume}% · "
+            f"**Filter:** {FILTER_LABELS.get(player.audio_filter, '🚫 None')} · "
+            f"**Autoplay:** {autoplay_label}"
         ),
         color=EMBED_COLOR,
     )
-    if t.thumbnail:
-        embed.set_thumbnail(url=t.thumbnail)
+    if t.artwork:
+        embed.set_thumbnail(url=t.artwork)
     embed.set_footer(
-        text=f"Requested by {getattr(t.requester, 'display_name', str(t.requester))} · Now Playing",
+        text=f"Requested by {getattr(requester, 'display_name', 'Autoplay')} · Now Playing · Lavalink",
         icon_url=bot.user.display_avatar.url if bot.user else None,
     )
     return embed
 
 
 class FilterSelect(discord.ui.Select):
-    def __init__(self, cog: "Music", state: GuildMusicState):
+    def __init__(self, cog: "Music", player: LavalinkPlayer):
         self.cog = cog
-        self.state = state
+        self.player = player
         options = [
-            discord.SelectOption(label=label, value=key, default=(key == state.audio_filter))
+            discord.SelectOption(label=label, value=key, default=(key == player.audio_filter))
             for key, label in FILTER_LABELS.items()
         ]
         super().__init__(placeholder="🎛️ Select Filters", options=options, min_values=1, max_values=1)
 
     async def callback(self, interaction: discord.Interaction):
-        self.state.audio_filter = self.values[0]
-        if self.state.voice_client and (self.state.voice_client.is_playing() or self.state.voice_client.is_paused()):
-            self.state.restart_requested = True
-            self.state.voice_client.stop()  # re-plays the same track with the new filter, from 0:00
-        await interaction.response.edit_message(embed=build_now_playing_embed(self.cog.bot, self.state), view=self.view)
+        key = self.values[0]
+        self.player.audio_filter = key
+        await self.player.set_filters(build_filters(key))
+        await interaction.response.edit_message(embed=build_now_playing_embed(self.cog.bot, self.player), view=self.view)
 
 
 class MusicControls(discord.ui.View):
-    def __init__(self, cog: "Music", state: GuildMusicState):
+    def __init__(self, cog: "Music", player: LavalinkPlayer):
         super().__init__(timeout=None)
         self.cog = cog
-        self.state = state
-        self.add_item(FilterSelect(cog, state))
+        self.player = player
+        self.add_item(FilterSelect(cog, player))
         self._sync_button_labels()
 
     def _sync_button_labels(self):
-        self.pause_btn.label = "Resume" if (self.state.voice_client and self.state.voice_client.is_paused()) else "Pause"
-        self.loop_btn.label = {"off": "Loop", "track": "Loop: Track", "queue": "Loop: Queue"}[self.state.loop_mode]
-        self.loop_btn.style = discord.ButtonStyle.primary if self.state.loop_mode != "off" else discord.ButtonStyle.secondary
-        self.autoplay_btn.label = "Autoplay: On" if self.state.autoplay else "Autoplay"
-        self.autoplay_btn.style = discord.ButtonStyle.success if self.state.autoplay else discord.ButtonStyle.secondary
+        self.pause_btn.label = "Resume" if self.player.paused else "Pause"
+        loop_label = {
+            wavelink.QueueMode.normal: "Loop",
+            wavelink.QueueMode.loop: "Loop: Track",
+            wavelink.QueueMode.loop_all: "Loop: Queue",
+        }[self.player.queue.mode]
+        self.loop_btn.label = loop_label
+        self.loop_btn.style = (
+            discord.ButtonStyle.primary if self.player.queue.mode != wavelink.QueueMode.normal
+            else discord.ButtonStyle.secondary
+        )
+        autoplay_on = self.player.autoplay is wavelink.AutoPlayMode.enabled
+        self.autoplay_btn.label = "Autoplay: On" if autoplay_on else "Autoplay"
+        self.autoplay_btn.style = discord.ButtonStyle.success if autoplay_on else discord.ButtonStyle.secondary
 
     async def _refresh(self, interaction: discord.Interaction):
         self._sync_button_labels()
-        await interaction.response.edit_message(embed=build_now_playing_embed(self.cog.bot, self.state), view=self)
+        await interaction.response.edit_message(embed=build_now_playing_embed(self.cog.bot, self.player), view=self)
 
     @discord.ui.button(label="Pause", style=discord.ButtonStyle.secondary, row=1)
     async def pause_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        vc = self.state.voice_client
-        if vc and vc.is_playing():
-            vc.pause()
-        elif vc and vc.is_paused():
-            vc.resume()
+        await self.player.pause(not self.player.paused)
         await self._refresh(interaction)
 
     @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, row=1)
     async def skip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.state.voice_client and (self.state.voice_client.is_playing() or self.state.voice_client.is_paused()):
-            self.state.loop_mode = "off" if self.state.loop_mode == "track" else self.state.loop_mode
-            self.state.voice_client.stop()
+        if self.player.queue.mode == wavelink.QueueMode.loop:
+            self.player.queue.mode = wavelink.QueueMode.normal
+        await self.player.skip(force=True)
         await interaction.response.defer()
 
     @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, row=1)
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.state.queue.clear()
-        self.state.loop_mode = "off"
-        self.state.autoplay = False
-        if self.state.voice_client and (self.state.voice_client.is_playing() or self.state.voice_client.is_paused()):
-            self.state.voice_client.stop()
+        self.player.queue.clear()
+        self.player.queue.mode = wavelink.QueueMode.normal
+        self.player.autoplay = wavelink.AutoPlayMode.partial
+        await self.player.skip(force=True)
         for item in self.children:
             item.disabled = True
         await interaction.response.edit_message(view=self)
 
     @discord.ui.button(label="Loop", style=discord.ButtonStyle.secondary, row=2)
     async def loop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        order = ["off", "track", "queue"]
-        self.state.loop_mode = order[(order.index(self.state.loop_mode) + 1) % len(order)]
+        order = [wavelink.QueueMode.normal, wavelink.QueueMode.loop, wavelink.QueueMode.loop_all]
+        self.player.queue.mode = order[(order.index(self.player.queue.mode) + 1) % len(order)]
         await self._refresh(interaction)
 
     @discord.ui.button(label="Shuffle", style=discord.ButtonStyle.secondary, row=2)
     async def shuffle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        random.shuffle(self.state.queue)
+        self.player.queue.shuffle()
         await interaction.response.send_message("🔀 Queue shuffled.", ephemeral=True)
 
     @discord.ui.button(label="Autoplay", style=discord.ButtonStyle.secondary, row=2)
     async def autoplay_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.state.autoplay = not self.state.autoplay
+        enabled = self.player.autoplay is wavelink.AutoPlayMode.enabled
+        self.player.autoplay = wavelink.AutoPlayMode.partial if enabled else wavelink.AutoPlayMode.enabled
         await self._refresh(interaction)
 
 
 class Music(commands.Cog, name="Music"):
-    """Mention-command music player: @Bot play/skip/stop/queue/join/leave/24-7/volume."""
+    """Mention-command music player, powered by Lavalink: @Bot play/skip/stop/queue/join/leave/24-7/volume/loop/shuffle/autoplay."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.states: dict[int, GuildMusicState] = {}
 
-    def get_state(self, guild: discord.Guild) -> GuildMusicState:
-        if guild.id not in self.states:
-            self.states[guild.id] = GuildMusicState(self.bot, guild)
-        return self.states[guild.id]
+    def _node_ready(self) -> bool:
+        return len(wavelink.Pool.nodes) > 0
 
-    async def _ensure_voice(self, ctx: commands.Context) -> GuildMusicState | None:
-        state = self.get_state(ctx.guild)
+    async def _no_node_error(self, ctx: commands.Context):
+        await ctx.reply(
+            embed=brand_embed(
+                self.bot,
+                description="❌ Music isn't available right now — the Lavalink server isn't connected. Ask the bot host to check it.",
+                color=ERROR_COLOR,
+            ),
+            mention_author=False,
+        )
+
+    async def _ensure_voice(self, ctx: commands.Context) -> LavalinkPlayer | None:
+        if not self._node_ready():
+            await self._no_node_error(ctx)
+            return None
         if ctx.author.voice is None or ctx.author.voice.channel is None:
             await ctx.reply(embed=brand_embed(self.bot, description="❌ Join a voice channel first.", color=ERROR_COLOR), mention_author=False)
             return None
-        if state.voice_client is None or not state.voice_client.is_connected():
-            state.voice_client = await ctx.author.voice.channel.connect()
-        elif state.voice_client.channel.id != ctx.author.voice.channel.id:
-            await state.voice_client.move_to(ctx.author.voice.channel)
-        state.text_channel = ctx.channel
-        return state
+
+        player: LavalinkPlayer = ctx.voice_client
+        if player is None:
+            try:
+                player = await ctx.author.voice.channel.connect(cls=LavalinkPlayer, self_deaf=True)
+            except discord.ClientException:
+                await ctx.reply(embed=brand_embed(self.bot, description="❌ Already connecting — try again in a second.", color=ERROR_COLOR), mention_author=False)
+                return None
+            player.autoplay = wavelink.AutoPlayMode.partial
+        elif player.channel.id != ctx.author.voice.channel.id:
+            await player.move_to(ctx.author.voice.channel)
+
+        player.text_channel = ctx.channel
+        player.cancel_idle_timer()
+        return player
+
+    def get_player(self, ctx: commands.Context) -> LavalinkPlayer | None:
+        return ctx.voice_client
+
+    # ---------- Lavalink node / player events ----------
+    @commands.Cog.listener()
+    async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
+        log.info("Lavalink node ready: %s (session %s)", payload.node.uri, payload.session_id)
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_start(self, payload: wavelink.TrackStartEventPayload):
+        player: LavalinkPlayer = payload.player
+        if not player or not isinstance(player, LavalinkPlayer) or not player.text_channel:
+            return
+        view = MusicControls(self, player)
+        embed = build_now_playing_embed(self.bot, player)
+        try:
+            player.now_playing_message = await player.text_channel.send(embed=embed, view=view)
+        except discord.HTTPException:
+            player.now_playing_message = None
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
+        player: LavalinkPlayer = payload.player
+        if not player or not isinstance(player, LavalinkPlayer):
+            return
+        if not player.playing and player.queue.is_empty:
+            player.start_idle_timer()
 
     # ---------- join / leave ----------
     @commands.command(name="join", aliases=["summon"])
     async def join(self, ctx: commands.Context):
-        state = await self._ensure_voice(ctx)
-        if state:
-            await ctx.reply(embed=brand_embed(self.bot, description=f"✅ Joined **{state.voice_client.channel.name}**.", color=SUCCESS_COLOR), mention_author=False)
+        player = await self._ensure_voice(ctx)
+        if player:
+            await ctx.reply(embed=brand_embed(self.bot, description=f"✅ Joined **{player.channel.name}**.", color=SUCCESS_COLOR), mention_author=False)
 
     @commands.command(name="leave", aliases=["disconnect", "dc"])
     async def leave(self, ctx: commands.Context):
-        state = self.get_state(ctx.guild)
-        if state.voice_client:
-            state.queue.clear()
-            await state.voice_client.disconnect()
-            state.voice_client = None
-            state.current = None
+        player = self.get_player(ctx)
+        if player:
+            player.cancel_idle_timer()
+            player.queue.clear()
+            await player.disconnect()
         await ctx.reply(embed=brand_embed(self.bot, description="👋 Left the voice channel.", color=SUCCESS_COLOR), mention_author=False)
 
     # ---------- play ----------
@@ -385,110 +326,155 @@ class Music(commands.Cog, name="Music"):
         if not query:
             return await ctx.reply(embed=brand_embed(self.bot, description=f"Usage: `@{self.bot.user.name} play <song name or link>`", color=ERROR_COLOR), mention_author=False)
 
-        state = await self._ensure_voice(ctx)
-        if not state:
+        player = await self._ensure_voice(ctx)
+        if not player:
             return
 
         status = await ctx.reply(embed=loading_embed(self.bot, f"🔎 Searching for **{query}**..."), mention_author=False)
 
-        loop = asyncio.get_event_loop()
         try:
-            info = await loop.run_in_executor(None, functools.partial(_extract, query))
+            results: wavelink.Search = await wavelink.Playable.search(query)
         except Exception:
             log.exception("Search failed for query: %s", query)
+            return await status.edit(embed=brand_embed(self.bot, description="❌ Couldn't reach Lavalink to search for that.", color=ERROR_COLOR))
+
+        if not results:
             return await status.edit(embed=brand_embed(self.bot, description="❌ Couldn't find that song.", color=ERROR_COLOR))
 
-        track = Track(
-            title=info.get("title", "Unknown title"),
-            webpage_url=info.get("webpage_url") or query,
-            duration=info.get("duration"),
-            requester=ctx.author,
-            thumbnail=info.get("thumbnail"),
-            uploader=info.get("uploader"),
-        )
-        was_idle = state.is_idle()
-        state.enqueue(track)
+        was_idle = not player.playing and player.queue.is_empty
 
-        if was_idle:
-            await status.edit(embed=brand_embed(self.bot, description=f"▶️ Starting **{track.title}**...", color=SUCCESS_COLOR))
+        if isinstance(results, wavelink.Playlist):
+            for track in results.tracks:
+                track.extras = {"requester": ctx.author}
+            await player.queue.put_wait(results.tracks)
+            await status.edit(embed=brand_embed(self.bot, title="➕ Playlist queued", description=f"**{results.name}** — {len(results.tracks)} tracks", color=SUCCESS_COLOR))
         else:
-            await status.edit(embed=brand_embed(self.bot, title="➕ Added to queue", description=f"**{track.title}**\nPosition in queue: **{len(state.queue)}**", color=SUCCESS_COLOR))
+            track = results[0]
+            track.extras = {"requester": ctx.author}
+            await player.queue.put_wait(track)
+            if was_idle:
+                await status.edit(embed=brand_embed(self.bot, description=f"▶️ Starting **{track.title}**...", color=SUCCESS_COLOR))
+            else:
+                await status.edit(embed=brand_embed(self.bot, title="➕ Added to queue", description=f"**{track.title}**\nPosition in queue: **{len(player.queue)}**", color=SUCCESS_COLOR))
+
+        if not player.playing:
+            next_track = player.queue.get()
+            await player.play(next_track)
 
     # ---------- playback controls (text-command versions, still work alongside the buttons) ----------
     @commands.command(name="skip", aliases=["next", "s"])
     async def skip(self, ctx: commands.Context):
-        state = self.get_state(ctx.guild)
-        if not state.voice_client or not (state.voice_client.is_playing() or state.voice_client.is_paused()):
+        player = self.get_player(ctx)
+        if not player or not player.playing:
             return await ctx.reply(embed=brand_embed(self.bot, description="❌ Nothing is playing.", color=ERROR_COLOR), mention_author=False)
-        skipped = state.current.title if state.current else "the current track"
-        state.loop_mode = "off" if state.loop_mode == "track" else state.loop_mode
-        state.voice_client.stop()
+        skipped = player.current.title if player.current else "the current track"
+        if player.queue.mode == wavelink.QueueMode.loop:
+            player.queue.mode = wavelink.QueueMode.normal
+        await player.skip(force=True)
         await ctx.reply(embed=brand_embed(self.bot, description=f"⏭️ Skipped **{skipped}**.", color=SUCCESS_COLOR), mention_author=False)
 
     @commands.command(name="stop")
     async def stop(self, ctx: commands.Context):
-        state = self.get_state(ctx.guild)
-        state.queue.clear()
-        state.loop_mode = "off"
-        state.autoplay = False
-        if state.voice_client and (state.voice_client.is_playing() or state.voice_client.is_paused()):
-            state.voice_client.stop()
+        player = self.get_player(ctx)
+        if not player:
+            return await ctx.reply(embed=brand_embed(self.bot, description="❌ Nothing is playing.", color=ERROR_COLOR), mention_author=False)
+        player.queue.clear()
+        player.queue.mode = wavelink.QueueMode.normal
+        player.autoplay = wavelink.AutoPlayMode.partial
+        if player.playing:
+            await player.skip(force=True)
         await ctx.reply(embed=brand_embed(self.bot, description="⏹️ Stopped and cleared the queue.", color=SUCCESS_COLOR), mention_author=False)
 
     @commands.command(name="pause")
     async def pause(self, ctx: commands.Context):
-        state = self.get_state(ctx.guild)
-        if state.voice_client and state.voice_client.is_playing():
-            state.voice_client.pause()
+        player = self.get_player(ctx)
+        if player and player.playing and not player.paused:
+            await player.pause(True)
             return await ctx.reply(embed=brand_embed(self.bot, description="⏸️ Paused.", color=SUCCESS_COLOR), mention_author=False)
         await ctx.reply(embed=brand_embed(self.bot, description="❌ Nothing is playing.", color=ERROR_COLOR), mention_author=False)
 
     @commands.command(name="resume", aliases=["unpause"])
     async def resume(self, ctx: commands.Context):
-        state = self.get_state(ctx.guild)
-        if state.voice_client and state.voice_client.is_paused():
-            state.voice_client.resume()
+        player = self.get_player(ctx)
+        if player and player.paused:
+            await player.pause(False)
             return await ctx.reply(embed=brand_embed(self.bot, description="▶️ Resumed.", color=SUCCESS_COLOR), mention_author=False)
         await ctx.reply(embed=brand_embed(self.bot, description="❌ Nothing is paused.", color=ERROR_COLOR), mention_author=False)
+
+    @commands.command(name="loop")
+    async def loop(self, ctx: commands.Context):
+        player = self.get_player(ctx)
+        if not player:
+            return await ctx.reply(embed=brand_embed(self.bot, description="❌ Nothing is playing.", color=ERROR_COLOR), mention_author=False)
+        order = [wavelink.QueueMode.normal, wavelink.QueueMode.loop, wavelink.QueueMode.loop_all]
+        player.queue.mode = order[(order.index(player.queue.mode) + 1) % len(order)]
+        labels = {wavelink.QueueMode.normal: "Off", wavelink.QueueMode.loop: "Track", wavelink.QueueMode.loop_all: "Queue"}
+        await ctx.reply(embed=brand_embed(self.bot, description=f"🔁 Loop mode: **{labels[player.queue.mode]}**.", color=SUCCESS_COLOR), mention_author=False)
+
+    @commands.command(name="shuffle")
+    async def shuffle(self, ctx: commands.Context):
+        player = self.get_player(ctx)
+        if not player or player.queue.is_empty:
+            return await ctx.reply(embed=brand_embed(self.bot, description="❌ The queue is empty.", color=ERROR_COLOR), mention_author=False)
+        player.queue.shuffle()
+        await ctx.reply(embed=brand_embed(self.bot, description="🔀 Queue shuffled.", color=SUCCESS_COLOR), mention_author=False)
+
+    @commands.command(name="autoplay")
+    async def autoplay_cmd(self, ctx: commands.Context):
+        player = self.get_player(ctx)
+        if not player:
+            return await ctx.reply(embed=brand_embed(self.bot, description="❌ Nothing is playing.", color=ERROR_COLOR), mention_author=False)
+        enabled = player.autoplay is wavelink.AutoPlayMode.enabled
+        player.autoplay = wavelink.AutoPlayMode.partial if enabled else wavelink.AutoPlayMode.enabled
+        status = "disabled" if enabled else "enabled — I'll play similar tracks once the queue ends"
+        await ctx.reply(embed=brand_embed(self.bot, description=f"🔄 Autoplay {status}.", color=SUCCESS_COLOR), mention_author=False)
 
     # ---------- info ----------
     @commands.command(name="queue", aliases=["q"])
     async def queue_cmd(self, ctx: commands.Context):
-        state = self.get_state(ctx.guild)
-        if not state.current and not state.queue:
+        player = self.get_player(ctx)
+        if not player or (not player.current and player.queue.is_empty):
             return await ctx.reply(embed=brand_embed(self.bot, description="The queue is empty.", color=EMBED_COLOR), mention_author=False)
         lines = []
-        if state.current:
-            lines.append(f"**Now playing:** {state.current.title} · `{_format_duration(state.current.duration)}`")
-        for i, tr in enumerate(state.queue[:10], start=1):
-            lines.append(f"`{i}.` {tr.title} · `{_format_duration(tr.duration)}` — {getattr(tr.requester, 'mention', tr.requester)}")
-        if len(state.queue) > 10:
-            lines.append(f"...and {len(state.queue) - 10} more")
+        if player.current:
+            lines.append(f"**Now playing:** {player.current.title} · `{_format_duration(player.current.length)}`")
+        upcoming = list(player.queue)[:10]
+        for i, tr in enumerate(upcoming, start=1):
+            requester = _requester(tr)
+            lines.append(f"`{i}.` {tr.title} · `{_format_duration(tr.length)}` — {getattr(requester, 'mention', 'Autoplay')}")
+        if len(player.queue) > 10:
+            lines.append(f"...and {len(player.queue) - 10} more")
         await ctx.reply(embed=brand_embed(self.bot, title="🎼 Queue", description="\n".join(lines), color=EMBED_COLOR), mention_author=False)
 
     @commands.command(name="nowplaying", aliases=["np"])
     async def nowplaying(self, ctx: commands.Context):
-        state = self.get_state(ctx.guild)
-        if not state.current:
+        player = self.get_player(ctx)
+        if not player or not player.current:
             return await ctx.reply(embed=brand_embed(self.bot, description="Nothing is playing.", color=EMBED_COLOR), mention_author=False)
-        await ctx.reply(embed=build_now_playing_embed(self.bot, state), view=MusicControls(self, state), mention_author=False)
+        await ctx.reply(embed=build_now_playing_embed(self.bot, player), view=MusicControls(self, player), mention_author=False)
 
     @commands.command(name="volume", aliases=["vol"])
     async def volume(self, ctx: commands.Context, level: int = None):
-        state = self.get_state(ctx.guild)
+        player = self.get_player(ctx)
+        if not player:
+            if not self._node_ready():
+                return await self._no_node_error(ctx)
+            return await ctx.reply(embed=brand_embed(self.bot, description="❌ I'm not in a voice channel.", color=ERROR_COLOR), mention_author=False)
         if level is None:
-            return await ctx.reply(embed=brand_embed(self.bot, description=f"🔊 Current volume: **{int(state.volume * 100)}%**", color=EMBED_COLOR), mention_author=False)
+            return await ctx.reply(embed=brand_embed(self.bot, description=f"🔊 Current volume: **{player.volume}%**", color=EMBED_COLOR), mention_author=False)
         level = max(0, min(level, 150))
-        state.volume = level / 100
-        if state.voice_client and state.voice_client.source:
-            state.voice_client.source.volume = state.volume
+        await player.set_volume(level)
         await ctx.reply(embed=brand_embed(self.bot, description=f"🔊 Volume set to **{level}%**.", color=SUCCESS_COLOR), mention_author=False)
 
     @commands.command(name="24/7", aliases=["247"])
     async def twenty_four_seven(self, ctx: commands.Context):
-        state = self.get_state(ctx.guild)
-        state.stay_247 = not state.stay_247
-        status = "enabled — I'll stay connected even with an empty queue" if state.stay_247 else "disabled — I'll leave after being idle a while"
+        player = await self._ensure_voice(ctx)
+        if not player:
+            return
+        player.stay_247 = not player.stay_247
+        if player.stay_247:
+            player.cancel_idle_timer()
+        status = "enabled — I'll stay connected even with an empty queue" if player.stay_247 else "disabled — I'll leave after being idle a while"
         await ctx.reply(embed=brand_embed(self.bot, description=f"🔁 24/7 mode {status}.", color=SUCCESS_COLOR), mention_author=False)
 
 
