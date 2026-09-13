@@ -29,6 +29,35 @@ def _dangerous_perms_on(role: discord.Role) -> list[str]:
     return [p.replace("_", " ") for p in DANGEROUS_PERMS if getattr(perms, p, False)]
 
 
+async def perform_autorole_add(bot: commands.Bot, guild: discord.Guild, role: discord.Role) -> discord.Embed:
+    """Shared by both /autorole add and the '@Bot autorole add @role' mention command."""
+    if role >= guild.me.top_role:
+        return brand_embed(
+            bot,
+            title="❌ Can't use that role",
+            description="That role is higher than or equal to my top role. "
+                        "Move my role above it in Server Settings → Roles.",
+            color=ERROR_COLOR,
+        )
+
+    dangerous = _dangerous_perms_on(role)
+    if dangerous:
+        return brand_embed(
+            bot,
+            title="🛑 Refused — that role is too dangerous to auto-assign",
+            description=(
+                f"{role.mention} has **{', '.join(dangerous)}**.\n"
+                "Giving that to every new member on join is a serious security risk "
+                "(raid/nuke potential), so I won't set it as an autorole.\n\n"
+                "Create a separate, low-permission role for autorole instead."
+            ),
+            color=ERROR_COLOR,
+        )
+
+    await db.add_autorole(guild.id, role.id)
+    return brand_embed(bot, description=f"✅ {role.mention} will now be given to new members.", color=SUCCESS_COLOR)
+
+
 class Autorole(commands.Cog):
     """Automatically assigns one or more roles to members when they join."""
 
@@ -40,35 +69,7 @@ class Autorole(commands.Cog):
     @autorole_group.command(name="add", description="Add a role to auto-assign to new members")
     @app_commands.checks.has_permissions(manage_roles=True)
     async def add(self, interaction: discord.Interaction, role: discord.Role):
-        if role >= interaction.guild.me.top_role:
-            embed = brand_embed(
-                self.bot,
-                title="❌ Can't use that role",
-                description="That role is higher than or equal to my top role. "
-                            "Move my role above it in Server Settings → Roles.",
-                color=ERROR_COLOR,
-            )
-            return await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        dangerous = _dangerous_perms_on(role)
-        if dangerous:
-            embed = brand_embed(
-                self.bot,
-                title="🛑 Refused — that role is too dangerous to auto-assign",
-                description=(
-                    f"{role.mention} has **{', '.join(dangerous)}**.\n"
-                    "Giving that to every new member on join is a serious security risk "
-                    "(raid/nuke potential), so I won't set it as an autorole.\n\n"
-                    "Create a separate, low-permission role for autorole instead."
-                ),
-                color=ERROR_COLOR,
-            )
-            return await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        await db.add_autorole(interaction.guild_id, role.id)
-        embed = brand_embed(
-            self.bot, description=f"✅ {role.mention} will now be given to new members.", color=SUCCESS_COLOR,
-        )
+        embed = await perform_autorole_add(self.bot, interaction.guild, role)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @autorole_group.command(name="remove", description="Remove a role from the auto-assign list")

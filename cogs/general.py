@@ -8,6 +8,112 @@ from config import EMBED_COLOR, SUCCESS_COLOR, ERROR_COLOR
 from utils.embeds import brand_embed, loading_embed
 
 
+def build_help_embed(bot: commands.Bot, mention_style: bool = False) -> discord.Embed:
+    """Shared by /help and '@Bot help'. mention_style swaps the '/' examples for '@Bot' ones."""
+    prefix = f"@{bot.user.name} " if mention_style else "/"
+    embed = brand_embed(
+        bot,
+        title="🤖 Welcomer Bot — Commands",
+        description=(
+            f"New here? Run **`{'@' + bot.user.name + ' ' if mention_style else '/'}autosetup`**"
+            " to configure everything in one step.\n"
+            "All configuration commands below require **Manage Server** unless noted otherwise.\n"
+            + ("\nYou can use these either with `/` slash commands, or by mentioning me like "
+               f"`@{bot.user.name} ping`." if not mention_style else "")
+        ),
+        color=EMBED_COLOR,
+    )
+    embed.add_field(
+        name="🛠️ Quick Start",
+        value=f"`{prefix}autosetup` — guided one-command setup for welcome, leave & DM messages",
+        inline=False,
+    )
+    embed.add_field(
+        name="👋 Welcome",
+        value=(
+            f"`{prefix}welcome channel` — set welcome channel\n"
+            f"`{prefix}welcome toggle` — enable/disable\n"
+            f"`{prefix}welcome message` — set message text\n"
+            f"`{prefix}welcome reset` — restore default message\n"
+            f"`{prefix}welcome card` — toggle image card\n"
+            f"`{prefix}welcome background` — set card background image\n"
+            f"`{prefix}welcome dm` — configure DM welcome\n"
+            f"`{prefix}welcome dm-reset` — restore default DM text\n"
+            f"`{prefix}welcome test` — preview (anyone)\n"
+            f"`{prefix}welcome placeholders` — list variables (anyone)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🚪 Leave",
+        value=(
+            f"`{prefix}leave channel` — set leave channel\n"
+            f"`{prefix}leave toggle` — enable/disable\n"
+            f"`{prefix}leave message` — set message text\n"
+            f"`{prefix}leave reset` — restore default message\n"
+            f"`{prefix}leave test` — preview (anyone)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎭 Autorole",
+        value=(
+            f"`{prefix}autorole add` — add a join role\n"
+            f"`{prefix}autorole remove` — remove a join role\n"
+            f"`{prefix}autorole list` — list join roles (anyone)\n"
+            f"`{prefix}autorole clear` — remove all"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎵 Music (mention-only, no slash)",
+        value=(
+            f"`@{bot.user.name} play <song>` (or `p`) — play/queue a song\n"
+            f"`@{bot.user.name} skip` — skip the current song\n"
+            f"`@{bot.user.name} stop` — stop and clear the queue\n"
+            f"`@{bot.user.name} pause` / `resume` — pause/resume\n"
+            f"`@{bot.user.name} queue` — show the queue\n"
+            f"`@{bot.user.name} nowplaying` (or `np`) — show current song\n"
+            f"`@{bot.user.name} join` / `leave` — voice channel control\n"
+            f"`@{bot.user.name} 24/7` — toggle staying connected 24/7\n"
+            f"`@{bot.user.name} volume <0-150>` — set volume"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="⚙️ General",
+        value=(
+            f"`{prefix}config` — view full configuration\n"
+            f"`{prefix}embed-color` — set embed color\n"
+            f"`{prefix}stats` — join/leave stats (anyone)\n"
+            f"`{prefix}ping` — latency check (anyone)"
+        ),
+        inline=False,
+    )
+    return embed
+
+
+async def run_ping_measurement(bot: commands.Bot, guild_id: int, api_probe) -> discord.Embed:
+    """Shared latency measurement for /ping and '@Bot ping'.
+    api_probe is an async callable that performs one real REST round trip and
+    returns the elapsed seconds (differs slightly between interactions and messages)."""
+    ws_latency_ms = bot.latency * 1000
+    api_latency_ms = (await api_probe()) * 1000
+
+    db_start = time.perf_counter()
+    await db.get_settings(guild_id)
+    db_latency_ms = (time.perf_counter() - db_start) * 1000
+
+    total_ms = ws_latency_ms + api_latency_ms + db_latency_ms
+
+    embed = brand_embed(bot, title="🏓 Pong!", color=EMBED_COLOR)
+    embed.add_field(name="🔌 Websocket", value=f"`{ws_latency_ms:.5f}ms`", inline=True)
+    embed.add_field(name="🌐 Discord API", value=f"`{api_latency_ms:.5f}ms`", inline=True)
+    embed.add_field(name="🗄️ Database", value=f"`{db_latency_ms:.5f}ms`", inline=True)
+    embed.add_field(name="⏱️ Total", value=f"`{total_ms:.5f}ms`", inline=False)
+    return embed
+
+
 class General(commands.Cog):
     """Core utility commands: config overview, embed color, stats, help, ping."""
 
@@ -98,102 +204,21 @@ class General(commands.Cog):
     # ---------- /ping ----------
     @app_commands.command(name="ping", description="Check the bot's full latency breakdown")
     async def ping(self, interaction: discord.Interaction):
-        # Show a quick "beautiful loading" state first.
         await interaction.response.send_message(embed=loading_embed(self.bot, "📡 Pinging everything..."))
 
-        ws_latency_ms = self.bot.latency * 1000  # heartbeat latency, always available
+        async def api_probe():
+            start = time.perf_counter()
+            await interaction.original_response()
+            return time.perf_counter() - start
 
-        # API latency: time a real round trip to Discord's REST API.
-        api_start = time.perf_counter()
-        # A genuine REST round trip: fetch the message we just sent.
-        sent_message = await interaction.original_response()
-        api_latency_ms = (time.perf_counter() - api_start) * 1000
-
-        # Database latency: time a real round trip to the DB.
-        db_start = time.perf_counter()
-        await db.get_settings(interaction.guild_id)
-        db_latency_ms = (time.perf_counter() - db_start) * 1000
-
-        total_ms = ws_latency_ms + api_latency_ms + db_latency_ms
-
-        embed = brand_embed(
-            self.bot,
-            title="🏓 Pong!",
-            color=EMBED_COLOR,
-        )
-        embed.add_field(name="🔌 Websocket", value=f"`{ws_latency_ms:.5f}ms`", inline=True)
-        embed.add_field(name="🌐 Discord API", value=f"`{api_latency_ms:.5f}ms`", inline=True)
-        embed.add_field(name="🗄️ Database", value=f"`{db_latency_ms:.5f}ms`", inline=True)
-        embed.add_field(name="⏱️ Total", value=f"`{total_ms:.5f}ms`", inline=False)
-
-        await sent_message.edit(embed=embed)
+        embed = await run_ping_measurement(self.bot, interaction.guild_id, api_probe)
+        await interaction.edit_original_response(embed=embed)
 
     # ---------- /help ----------
     @app_commands.command(name="help", description="List all commands the welcomer bot provides")
     async def help_cmd(self, interaction: discord.Interaction):
-        embed = brand_embed(
-            self.bot,
-            title="🤖 Welcomer Bot — Commands",
-            description=(
-                "New here? Run **`/autosetup`** to configure everything in one step.\n"
-                "All configuration commands below require **Manage Server** unless noted otherwise."
-            ),
-            color=EMBED_COLOR,
-        )
-        embed.add_field(
-            name="🛠️ Quick Start",
-            value="`/autosetup` — guided one-command setup for welcome, leave & DM messages",
-            inline=False,
-        )
-        embed.add_field(
-            name="👋 Welcome",
-            value=(
-                "`/welcome channel` — set welcome channel\n"
-                "`/welcome toggle` — enable/disable\n"
-                "`/welcome message` — set message text\n"
-                "`/welcome reset` — restore default message\n"
-                "`/welcome card` — toggle image card\n"
-                "`/welcome background` — set card background image\n"
-                "`/welcome dm` — configure DM welcome\n"
-                "`/welcome dm-reset` — restore default DM text\n"
-                "`/welcome test` — preview (anyone)\n"
-                "`/welcome placeholders` — list variables (anyone)"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="🚪 Leave",
-            value=(
-                "`/leave channel` — set leave channel\n"
-                "`/leave toggle` — enable/disable\n"
-                "`/leave message` — set message text\n"
-                "`/leave reset` — restore default message\n"
-                "`/leave test` — preview (anyone)"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="🎭 Autorole",
-            value=(
-                "`/autorole add` — add a join role\n"
-                "`/autorole remove` — remove a join role\n"
-                "`/autorole list` — list join roles (anyone)\n"
-                "`/autorole clear` — remove all"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="⚙️ General",
-            value=(
-                "`/config` — view full configuration\n"
-                "`/embed-color` — set embed color\n"
-                "`/stats` — join/leave stats (anyone)\n"
-                "`/ping` — latency check (anyone)"
-            ),
-            inline=False,
-        )
         # Not ephemeral: everyone in the channel should be able to see the command list.
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=build_help_embed(self.bot))
 
     # ---------- error handling for this cog's app commands ----------
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
