@@ -1,4 +1,5 @@
-import time
+
+import psutil
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -111,11 +112,31 @@ async def run_ping_measurement(bot: commands.Bot, guild_id: int, api_probe) -> d
 
     total_ms = ws_latency_ms + api_latency_ms + db_latency_ms
 
+    # VPS / bot process statistics
+    cpu_percent = psutil.cpu_percent()
+    memory = psutil.virtual_memory()
+    ram_used_gb = memory.used / (1024 ** 3)
+    ram_total_gb = memory.total / (1024 ** 3)
+
+    process = psutil.Process()
+    bot_ram_mb = process.memory_info().rss / (1024 ** 2)
+
     embed = brand_embed(bot, title="🏓 Pong!", color=EMBED_COLOR)
-    embed.add_field(name="🔌 Websocket", value=f"`{ws_latency_ms:.5f}ms`", inline=True)
-    embed.add_field(name="🌐 Discord API", value=f"`{api_latency_ms:.5f}ms`", inline=True)
-    embed.add_field(name="🗄️ Database", value=f"`{db_latency_ms:.5f}ms`", inline=True)
-    embed.add_field(name="⏱️ Total", value=f"`{total_ms:.5f}ms`", inline=False)
+
+    # Discord latency
+    embed.add_field(name="🔌 WebSocket", value=f"`{ws_latency_ms:.2f}ms`", inline=True)
+    embed.add_field(name="🌐 Discord API", value=f"`{api_latency_ms:.2f}ms`", inline=True)
+    embed.add_field(name="🗄️ Database", value=f"`{db_latency_ms:.2f}ms`", inline=True)
+
+    # VPS statistics
+    embed.add_field(name="💻 VPS CPU", value=f"`{cpu_percent:.1f}%`", inline=True)
+    embed.add_field(name="🧠 VPS RAM", value=f"`{ram_used_gb:.2f} GB / {ram_total_gb:.2f} GB`", inline=True)
+    embed.add_field(name="🤖 Bot RAM", value=f"`{bot_ram_mb:.1f} MB`", inline=True)
+
+    # Database information
+    embed.add_field(name="📦 Database Type", value="`SQLite`", inline=True)
+    embed.add_field(name="⏱️ Total Latency", value=f"`{total_ms:.2f}ms`", inline=True)
+
     return embed
 
 
