@@ -21,6 +21,7 @@ from discord.ext import commands
 import wavelink
 
 from config import SUCCESS_COLOR, ERROR_COLOR, EMBED_COLOR
+from database import db
 from utils.embeds import brand_embed, loading_embed
 
 log = logging.getLogger("welcomer.music")
@@ -283,6 +284,27 @@ class Music(commands.Cog, name="Music"):
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload):
         log.info("Lavalink node ready: %s (session %s)", payload.node.uri, payload.session_id)
+        await self._rejoin_247_channels()
+
+    async def _rejoin_247_channels(self):
+        """On startup (once Lavalink is reachable), reconnect to any voice
+        channel that had 24/7 enabled before the bot last restarted."""
+        for row in await db.list_247_guilds():
+            guild = self.bot.get_guild(row["guild_id"])
+            if not guild:
+                continue
+            channel = guild.get_channel(row["stay_247_channel_id"])
+            if not isinstance(channel, discord.VoiceChannel):
+                continue
+            if guild.voice_client is not None:
+                continue  # already connected somehow
+            try:
+                player: LavalinkPlayer = await channel.connect(cls=LavalinkPlayer, self_deaf=True)
+                player.autoplay = wavelink.AutoPlayMode.partial
+                player.stay_247 = True
+                log.info("Rejoined 24/7 channel #%s in guild %s", channel.name, guild.name)
+            except Exception:
+                log.exception("Failed to rejoin 24/7 channel in guild %s", guild.id)
 
     @commands.Cog.listener()
     async def on_wavelink_track_start(self, payload: wavelink.TrackStartEventPayload):
@@ -466,7 +488,7 @@ class Music(commands.Cog, name="Music"):
         await player.set_volume(level)
         await ctx.reply(embed=brand_embed(self.bot, description=f"🔊 Volume set to **{level}%**.", color=SUCCESS_COLOR), mention_author=False)
 
-    @commands.command(name="24/7", aliases=["247"])
+    @commands.command(name="24/7", aliases=["247", "24.7"])
     async def twenty_four_seven(self, ctx: commands.Context):
         player = await self._ensure_voice(ctx)
         if not player:
@@ -474,7 +496,10 @@ class Music(commands.Cog, name="Music"):
         player.stay_247 = not player.stay_247
         if player.stay_247:
             player.cancel_idle_timer()
-        status = "enabled — I'll stay connected even with an empty queue" if player.stay_247 else "disabled — I'll leave after being idle a while"
+            await db.update(ctx.guild.id, stay_247=1, stay_247_channel_id=player.channel.id)
+        else:
+            await db.update(ctx.guild.id, stay_247=0)
+        status = "enabled — I'll stay connected 24/7, even through restarts" if player.stay_247 else "disabled — I'll leave after being idle a while"
         await ctx.reply(embed=brand_embed(self.bot, description=f"🔁 24/7 mode {status}.", color=SUCCESS_COLOR), mention_author=False)
 
 

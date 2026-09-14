@@ -6,6 +6,7 @@ from discord.ext import commands
 from database import db
 from config import EMBED_COLOR, SUCCESS_COLOR, ERROR_COLOR
 from utils.embeds import brand_embed, loading_embed
+from utils.help_menu import build_overview_embed, HelpView
 
 
 def build_help_embed(bot: commands.Bot, mention_style: bool = False) -> discord.Embed:
@@ -222,7 +223,7 @@ class General(commands.Cog):
     @app_commands.command(name="help", description="List all commands the welcomer bot provides")
     async def help_cmd(self, interaction: discord.Interaction):
         # Not ephemeral: everyone in the channel should be able to see the command list.
-        await interaction.response.send_message(embed=build_help_embed(self.bot))
+        await interaction.response.send_message(embed=build_overview_embed(self.bot), view=HelpView(self.bot))
 
     # ---------- error handling for this cog's app commands ----------
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
