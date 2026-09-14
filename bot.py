@@ -22,7 +22,6 @@ import wavelink
 
 from config import (
     TOKEN,
-    DEV_GUILD_ID,
     ERROR_COLOR,
     LAVALINK_HOST,
     LAVALINK_PORT,
@@ -47,13 +46,27 @@ EXTENSIONS = [
     "cogs.general",
     "cogs.mention_commands",
     "cogs.music",
+    "cogs.ignore",
+    "cogs.afk",
+    "cogs.owner",
+    "cogs.customization",
 ]
+
+
+async def get_prefix(bot: "WelcomerBot", message: discord.Message):
+    prefixes = ["!wb "]
+    if message.guild:
+        settings = await db.get_settings(message.guild.id)
+        if settings.get("custom_prefix"):
+            prefixes.append(settings["custom_prefix"])
+    return commands.when_mentioned_or(*prefixes)(bot, message)
 
 
 class WelcomerBot(commands.Bot):
     def __init__(self):
-        # Mention-prefix (e.g. "@Welcomer ping") always works; "!wb " still works too.
-        super().__init__(command_prefix=commands.when_mentioned_or("!wb "), intents=INTENTS, help_command=None)
+        # Mention-prefix always works everywhere; "!wb " and each server's
+        # optional custom prefix (see `bprefix`) work too.
+        super().__init__(command_prefix=get_prefix, intents=INTENTS, help_command=None)
 
     async def setup_hook(self):
         await db.connect()
@@ -80,14 +93,11 @@ class WelcomerBot(commands.Bot):
             await self.load_extension(ext)
             log.info(f"Loaded extension: {ext}")
 
-        if DEV_GUILD_ID:
-            guild = discord.Object(id=int(DEV_GUILD_ID))
-            self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
-            log.info(f"Synced {len(synced)} commands to dev guild {DEV_GUILD_ID}")
-        else:
-            synced = await self.tree.sync()
-            log.info(f"Synced {len(synced)} global commands")
+        # Always sync globally — global sync can take up to an hour to
+        # propagate to every server the first time, but afterward every
+        # server sees the same commands (no per-server dev guild exceptions).
+        synced = await self.tree.sync()
+        log.info(f"Synced {len(synced)} global commands")
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -101,7 +111,12 @@ class WelcomerBot(commands.Bot):
 
         ctx = await self.get_context(message)
         if ctx.valid:
-            # A real "@Bot <command>" or "!wb <command>" — run it.
+            # Ignored channels stay silent for mention/prefix commands — except
+            # the "ignore" command group itself, so admins can always un-ignore.
+            if ctx.command and ctx.command.qualified_name.split()[0] != "ignore":
+                settings = await db.get_settings(message.guild.id)
+                if message.channel.id in db.ignored_channel_ids(settings):
+                    return
             await self.invoke(ctx)
             return
 

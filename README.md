@@ -134,9 +134,9 @@ welcomer-bot/
    cp .env.example .env
    # edit .env and paste your bot token
    ```
-   Optionally set `DEV_GUILD_ID` to your test server's ID while developing —
-   this makes slash commands sync instantly instead of waiting up to an hour
-   for global sync.
+   Slash commands always sync globally now — the first sync after startup can
+   take up to an hour to show up everywhere, but after that every server sees
+   the same commands with no per-server exceptions.
 
 4. **Run the bot**:
    ```bash
