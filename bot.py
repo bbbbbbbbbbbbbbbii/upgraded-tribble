@@ -23,6 +23,7 @@ import wavelink
 from config import (
     TOKEN,
     ERROR_COLOR,
+    OWNER_IDS,
     LAVALINK_HOST,
     LAVALINK_PORT,
     LAVALINK_PASSWORD,
@@ -54,19 +55,47 @@ EXTENSIONS = [
 
 
 async def get_prefix(bot: "WelcomerBot", message: discord.Message):
-    prefixes = ["!wb "]
+    """
+    Prefixes tried, in order:
+      - bare bot mention, e.g. "<@123>" or "<@!123>" — NO trailing space required,
+        so "@Bot ping", "@Bot   ping", and "@Botping" (no space at all) all work.
+        (discord.py's arg parser skips any amount of whitespace after the prefix
+        is stripped, so a mention prefix with no trailing space handles all three.)
+      - "!wb " — the fixed fallback prefix
+      - each server's optional custom prefix (see `bprefix`)
+      - "" (empty string) — ONLY for users/guilds granted `noprefix`, letting
+        them run commands with no prefix or mention at all
+    Command name matching itself is case-insensitive (case_insensitive=True on
+    the Bot), so "@Bot PING" / "@Bot Ping" / "@Bot ping" all resolve the same.
+    """
+    if bot.user is None:
+        return commands.when_mentioned(bot, message)
+
+    prefixes = [f"<@{bot.user.id}>", f"<@!{bot.user.id}>", "!wb "]
     if message.guild:
         settings = await db.get_settings(message.guild.id)
         if settings.get("custom_prefix"):
             prefixes.append(settings["custom_prefix"])
-    return commands.when_mentioned_or(*prefixes)(bot, message)
+        if await db.is_noprefix_guild(message.guild.id) or await db.is_noprefix_user(message.author.id):
+            prefixes.append("")
+    return prefixes
 
 
 class WelcomerBot(commands.Bot):
     def __init__(self):
         # Mention-prefix always works everywhere; "!wb " and each server's
         # optional custom prefix (see `bprefix`) work too.
-        super().__init__(command_prefix=get_prefix, intents=INTENTS, help_command=None)
+        # owner_ids: if set in .env (OWNER_IDS), this hardcodes who passes
+        # bot.is_owner() instead of relying on the Developer Portal lookup.
+        # case_insensitive: "@Bot PING" / "@Bot Ping" / "@Bot ping" all resolve
+        # to the same command — see get_prefix() above for the spacing fix.
+        super().__init__(
+            command_prefix=get_prefix,
+            intents=INTENTS,
+            help_command=None,
+            owner_ids=OWNER_IDS,
+            case_insensitive=True,
+        )
 
     async def setup_hook(self):
         await db.connect()

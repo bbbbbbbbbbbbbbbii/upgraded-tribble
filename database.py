@@ -49,6 +49,26 @@ CREATE TABLE IF NOT EXISTS afk_users (
     since    TEXT NOT NULL,
     PRIMARY KEY (guild_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS noprefix_users (
+    user_id    INTEGER PRIMARY KEY,
+    added_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS noprefix_guilds (
+    guild_id   INTEGER PRIMARY KEY,
+    added_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS premium_users (
+    user_id    INTEGER PRIMARY KEY,
+    added_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS premium_guilds (
+    guild_id   INTEGER PRIMARY KEY,
+    added_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 _DEFAULTS = {
@@ -206,6 +226,72 @@ class Database:
     async def clear_afk(self, guild_id: int, user_id: int):
         await self._conn.execute("DELETE FROM afk_users WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
         await self._conn.commit()
+
+    # ---------- noprefix (trusted users/guilds can invoke commands with zero prefix) ----------
+    async def add_noprefix_user(self, user_id: int):
+        await self._conn.execute("INSERT OR IGNORE INTO noprefix_users (user_id) VALUES (?)", (user_id,))
+        await self._conn.commit()
+
+    async def remove_noprefix_user(self, user_id: int):
+        await self._conn.execute("DELETE FROM noprefix_users WHERE user_id = ?", (user_id,))
+        await self._conn.commit()
+
+    async def list_noprefix_users(self) -> list[int]:
+        cur = await self._conn.execute("SELECT user_id FROM noprefix_users")
+        return [r["user_id"] for r in await cur.fetchall()]
+
+    async def is_noprefix_user(self, user_id: int) -> bool:
+        cur = await self._conn.execute("SELECT 1 FROM noprefix_users WHERE user_id = ?", (user_id,))
+        return (await cur.fetchone()) is not None
+
+    async def add_noprefix_guild(self, guild_id: int):
+        await self._conn.execute("INSERT OR IGNORE INTO noprefix_guilds (guild_id) VALUES (?)", (guild_id,))
+        await self._conn.commit()
+
+    async def remove_noprefix_guild(self, guild_id: int):
+        await self._conn.execute("DELETE FROM noprefix_guilds WHERE guild_id = ?", (guild_id,))
+        await self._conn.commit()
+
+    async def list_noprefix_guilds(self) -> list[int]:
+        cur = await self._conn.execute("SELECT guild_id FROM noprefix_guilds")
+        return [r["guild_id"] for r in await cur.fetchall()]
+
+    async def is_noprefix_guild(self, guild_id: int) -> bool:
+        cur = await self._conn.execute("SELECT 1 FROM noprefix_guilds WHERE guild_id = ?", (guild_id,))
+        return (await cur.fetchone()) is not None
+
+    # ---------- premium (tracking/allowlist only — see note in owner.py) ----------
+    async def add_premium_user(self, user_id: int):
+        await self._conn.execute("INSERT OR IGNORE INTO premium_users (user_id) VALUES (?)", (user_id,))
+        await self._conn.commit()
+
+    async def remove_premium_user(self, user_id: int):
+        await self._conn.execute("DELETE FROM premium_users WHERE user_id = ?", (user_id,))
+        await self._conn.commit()
+
+    async def list_premium_users(self) -> list[dict]:
+        cur = await self._conn.execute("SELECT user_id, added_at FROM premium_users ORDER BY added_at")
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def is_premium_user(self, user_id: int) -> bool:
+        cur = await self._conn.execute("SELECT 1 FROM premium_users WHERE user_id = ?", (user_id,))
+        return (await cur.fetchone()) is not None
+
+    async def add_premium_guild(self, guild_id: int):
+        await self._conn.execute("INSERT OR IGNORE INTO premium_guilds (guild_id) VALUES (?)", (guild_id,))
+        await self._conn.commit()
+
+    async def remove_premium_guild(self, guild_id: int):
+        await self._conn.execute("DELETE FROM premium_guilds WHERE guild_id = ?", (guild_id,))
+        await self._conn.commit()
+
+    async def list_premium_guilds(self) -> list[dict]:
+        cur = await self._conn.execute("SELECT guild_id, added_at FROM premium_guilds ORDER BY added_at")
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def is_premium_guild(self, guild_id: int) -> bool:
+        cur = await self._conn.execute("SELECT 1 FROM premium_guilds WHERE guild_id = ?", (guild_id,))
+        return (await cur.fetchone()) is not None
 
 
 db = Database()

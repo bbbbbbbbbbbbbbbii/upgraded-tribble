@@ -8,6 +8,15 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
+# By default discord.py figures out the bot owner automatically by asking
+# Discord who owns this application (or, for team-owned apps, treats every
+# team member as an owner). Setting OWNER_IDS here overrides that lookup
+# entirely — only the ID(s) listed will pass bot.is_owner(), regardless of
+# who actually owns the application in the Developer Portal. Comma-separate
+# multiple IDs. Leave empty to keep the automatic Developer Portal behavior.
+_owner_ids_raw = os.getenv("OWNER_IDS", "").strip()
+OWNER_IDS = {int(i) for i in _owner_ids_raw.split(",") if i.strip().isdigit()} or None
+
 DB_PATH = os.getenv("DB_PATH", "welcomer.db")
 
 # ---- Lavalink (music) ----
