@@ -241,8 +241,42 @@ class Music(commands.Cog, name="Music"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # If Lavalink is already reachable by the time we're ready, this is a
+        # no-op duplicate of on_wavelink_node_ready's rejoin (harmless — it
+        # just skips guilds already correctly connected). If Lavalink is NOT
+        # reachable yet, this still gets 24/7 guilds into voice (music-less)
+        # right away instead of leaving them disconnected until Lavalink
+        # eventually comes up.
+        if self._node_ready():
+            await self._rejoin_247_channels()
+        else:
+            await self._rejoin_247_voice_only()
+
+    async def _rejoin_247_voice_only(self):
+        for row in await db.list_247_guilds():
+            guild = self.bot.get_guild(row["guild_id"])
+            if not guild or guild.voice_client is not None:
+                continue
+            channel = guild.get_channel(row["stay_247_channel_id"])
+            if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+                continue
+            try:
+                await channel.connect(cls=discord.VoiceClient, self_deaf=True)
+                log.info("Rejoined 24/7 channel #%s in guild %s (voice-only, Lavalink down)", channel.name, guild.name)
+            except Exception:
+                log.exception("Failed to voice-only-rejoin 24/7 channel in guild %s", guild.id)
+
     def _node_ready(self) -> bool:
-        return len(wavelink.Pool.nodes) > 0
+        # BUG FIX: `wavelink.Pool.nodes` lists every *registered* node, even
+        # ones that failed to connect or dropped later — checking just the
+        # count made join/24-7 think Lavalink was fine when it wasn't. Check
+        # each node's actual connection status instead.
+        return any(
+            getattr(node, "status", None) == wavelink.NodeStatus.CONNECTED
+            for node in wavelink.Pool.nodes.values()
+        )
 
     async def _no_node_error(self, ctx: commands.Context):
         await ctx.reply(
@@ -254,31 +288,65 @@ class Music(commands.Cog, name="Music"):
             mention_author=False,
         )
 
-    async def _ensure_voice(self, ctx: commands.Context) -> LavalinkPlayer | None:
-        if not self._node_ready():
-            await self._no_node_error(ctx)
-            return None
+    async def _ensure_voice(self, ctx: commands.Context, require_music: bool = True) -> LavalinkPlayer | None:
+        """
+        require_music=True (used by `play` and anything that streams audio):
+        Lavalink MUST be connected — errors out otherwise, same as before.
+
+        require_music=False (used by `join`/`24-7`, which are just "be present
+        in a voice channel" commands): if Lavalink isn't reachable, connects
+        with a plain discord.py VoiceClient instead — no music playback, but
+        the bot still joins and can sit there 24/7. If Lavalink IS reachable,
+        it still connects with the full LavalinkPlayer so `play` works right
+        away without needing to reconnect.
+        """
         if ctx.author.voice is None or ctx.author.voice.channel is None:
             await ctx.reply(embed=brand_embed(self.bot, description="❌ Join a voice channel first.", color=ERROR_COLOR), mention_author=False)
             return None
 
-        player: LavalinkPlayer = ctx.voice_client
-        if player is None:
+        node_ready = self._node_ready()
+        if require_music and not node_ready:
+            await self._no_node_error(ctx)
+            return None
+
+        existing = ctx.voice_client
+        target_cls = LavalinkPlayer if node_ready else discord.VoiceClient
+
+        # If we're already connected with the "wrong" client type for what we
+        # need now (e.g. joined voice-only earlier, Lavalink just came back
+        # and `play` was called), swap the connection over.
+        if existing is not None and node_ready and not isinstance(existing, LavalinkPlayer):
             try:
-                player = await ctx.author.voice.channel.connect(cls=LavalinkPlayer, self_deaf=True)
+                await existing.disconnect(force=True)
+            except Exception:
+                pass
+            existing = None
+
+        if existing is None:
+            try:
+                player = await ctx.author.voice.channel.connect(cls=target_cls, self_deaf=True)
             except discord.ClientException:
                 await ctx.reply(embed=brand_embed(self.bot, description="❌ Already connecting — try again in a second.", color=ERROR_COLOR), mention_author=False)
                 return None
-            player.autoplay = wavelink.AutoPlayMode.partial
-        elif player.channel.id != ctx.author.voice.channel.id:
-            await player.move_to(ctx.author.voice.channel)
+            if isinstance(player, LavalinkPlayer):
+                player.autoplay = wavelink.AutoPlayMode.partial
+        else:
+            player = existing
+            if player.channel.id != ctx.author.voice.channel.id:
+                await player.move_to(ctx.author.voice.channel)
 
-        player.text_channel = ctx.channel
-        player.cancel_idle_timer()
+        if isinstance(player, LavalinkPlayer):
+            player.text_channel = ctx.channel
+            player.cancel_idle_timer()
         return player
 
     def get_player(self, ctx: commands.Context) -> LavalinkPlayer | None:
-        return ctx.voice_client
+        """Only returns a player if it's a real Lavalink-backed one — a
+        voice-only (no Lavalink) connection returns None here, so playback
+        commands correctly say "nothing is playing" instead of crashing on
+        an attribute a plain discord.py VoiceClient doesn't have."""
+        vc = ctx.voice_client
+        return vc if isinstance(vc, LavalinkPlayer) else None
 
     # ---------- Lavalink node / player events ----------
     @commands.Cog.listener()
@@ -287,22 +355,33 @@ class Music(commands.Cog, name="Music"):
         await self._rejoin_247_channels()
 
     async def _rejoin_247_channels(self):
-        """On startup (once Lavalink is reachable), reconnect to any voice
-        channel that had 24/7 enabled before the bot last restarted."""
+        """Runs once Lavalink connects (on startup, or if it reconnects after
+        being down). For every guild with 24/7 enabled: if we're not in
+        voice at all, join fresh with full music support. If we're already
+        sitting there voice-only (joined while Lavalink was down), upgrade
+        that connection to a real LavalinkPlayer so playback works now."""
         for row in await db.list_247_guilds():
             guild = self.bot.get_guild(row["guild_id"])
             if not guild:
                 continue
             channel = guild.get_channel(row["stay_247_channel_id"])
-            if not isinstance(channel, discord.VoiceChannel):
+            if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
                 continue
-            if guild.voice_client is not None:
-                continue  # already connected somehow
+
+            existing = guild.voice_client
+            if isinstance(existing, LavalinkPlayer):
+                continue  # already fully set up
+            if existing is not None:
+                try:
+                    await existing.disconnect(force=True)
+                except Exception:
+                    pass
+
             try:
                 player: LavalinkPlayer = await channel.connect(cls=LavalinkPlayer, self_deaf=True)
                 player.autoplay = wavelink.AutoPlayMode.partial
                 player.stay_247 = True
-                log.info("Rejoined 24/7 channel #%s in guild %s", channel.name, guild.name)
+                log.info("Rejoined 24/7 channel #%s in guild %s (now with music)", channel.name, guild.name)
             except Exception:
                 log.exception("Failed to rejoin 24/7 channel in guild %s", guild.id)
 
@@ -329,17 +408,20 @@ class Music(commands.Cog, name="Music"):
     # ---------- join / leave ----------
     @commands.command(name="join", aliases=["summon"])
     async def join(self, ctx: commands.Context):
-        player = await self._ensure_voice(ctx)
+        player = await self._ensure_voice(ctx, require_music=False)
         if player:
-            await ctx.reply(embed=brand_embed(self.bot, description=f"✅ Joined **{player.channel.name}**.", color=SUCCESS_COLOR), mention_author=False)
+            note = "" if isinstance(player, LavalinkPlayer) else " (music isn't available right now — Lavalink isn't connected, so I'm here voice-only)"
+            await ctx.reply(embed=brand_embed(self.bot, description=f"✅ Joined **{player.channel.name}**.{note}", color=SUCCESS_COLOR), mention_author=False)
 
     @commands.command(name="leave", aliases=["disconnect", "dc"])
     async def leave(self, ctx: commands.Context):
-        player = self.get_player(ctx)
-        if player:
-            player.cancel_idle_timer()
-            player.queue.clear()
-            await player.disconnect()
+        vc = ctx.voice_client
+        if vc:
+            if isinstance(vc, LavalinkPlayer):
+                vc.cancel_idle_timer()
+                vc.queue.clear()
+            await db.update(ctx.guild.id, stay_247=0)
+            await vc.disconnect(force=True)
         await ctx.reply(embed=brand_embed(self.bot, description="👋 Left the voice channel.", color=SUCCESS_COLOR), mention_author=False)
 
     # ---------- play ----------
@@ -348,7 +430,7 @@ class Music(commands.Cog, name="Music"):
         if not query:
             return await ctx.reply(embed=brand_embed(self.bot, description=f"Usage: `@{self.bot.user.name} play <song name or link>`", color=ERROR_COLOR), mention_author=False)
 
-        player = await self._ensure_voice(ctx)
+        player = await self._ensure_voice(ctx, require_music=True)
         if not player:
             return
 
@@ -490,16 +572,30 @@ class Music(commands.Cog, name="Music"):
 
     @commands.command(name="24/7", aliases=["247", "24.7"])
     async def twenty_four_seven(self, ctx: commands.Context):
-        player = await self._ensure_voice(ctx)
+        """Toggles 24/7 presence. Works even without Lavalink connected — in
+        that case the bot just sits in the voice channel (no music), and will
+        automatically switch to full music mode once Lavalink comes back."""
+        player = await self._ensure_voice(ctx, require_music=False)
         if not player:
             return
-        player.stay_247 = not player.stay_247
-        if player.stay_247:
-            player.cancel_idle_timer()
+        currently_on = (await db.get_settings(ctx.guild.id))["stay_247"]
+        turning_on = not currently_on
+
+        if isinstance(player, LavalinkPlayer):
+            player.stay_247 = turning_on
+            if turning_on:
+                player.cancel_idle_timer()
+
+        if turning_on:
             await db.update(ctx.guild.id, stay_247=1, stay_247_channel_id=player.channel.id)
         else:
             await db.update(ctx.guild.id, stay_247=0)
-        status = "enabled — I'll stay connected 24/7, even through restarts" if player.stay_247 else "disabled — I'll leave after being idle a while"
+
+        if turning_on:
+            note = "" if isinstance(player, LavalinkPlayer) else " — no music playback right now since Lavalink isn't connected, but I'll stay in the channel and switch on music automatically once it's back"
+            status = f"enabled — I'll stay connected 24/7, even through restarts{note}"
+        else:
+            status = "disabled — I'll leave after being idle a while"
         await ctx.reply(embed=brand_embed(self.bot, description=f"🔁 24/7 mode {status}.", color=SUCCESS_COLOR), mention_author=False)
 
 
