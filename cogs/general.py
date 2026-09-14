@@ -1,4 +1,5 @@
 
+import time
 import psutil
 import discord
 from discord import app_commands
@@ -239,6 +240,60 @@ class General(commands.Cog):
 
         embed = await run_ping_measurement(self.bot, interaction.guild_id, api_probe)
         await interaction.edit_original_response(embed=embed)
+
+    # ---------- /invite ----------
+    @app_commands.command(name="invite", description="Create a server invite and send it to the bot developer via DM")
+    @app_commands.describe(server_id="The Discord server ID")
+    async def invite(self, interaction: discord.Interaction, server_id: str):
+        app_info = await self.bot.application_info()
+
+        if interaction.user.id != app_info.owner.id:
+            await interaction.response.send_message(
+                "❌ Only the bot developer can use this command.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            guild_id = int(server_id)
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid server ID.", ephemeral=True)
+            return
+
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            await interaction.response.send_message("❌ I am not in that server.", ephemeral=True)
+            return
+
+        me = guild.me or guild.get_member(self.bot.user.id)
+
+        for channel in guild.text_channels:
+            if not channel.permissions_for(me).create_instant_invite:
+                continue
+            try:
+                invite = await channel.create_invite(
+                    max_age=0,
+                    max_uses=0,
+                    unique=True,
+                    reason=f"Server invite requested by bot developer {interaction.user}",
+                )
+                await interaction.user.send(
+                    f"🔗 **Server:** {guild.name}\n"
+                    f"🆔 **Server ID:** `{guild.id}`\n"
+                    f"📨 **Invite:** {invite.url}"
+                )
+                await interaction.response.send_message(
+                    "✅ Server invite link sent to your DM.",
+                    ephemeral=True,
+                )
+                return
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+
+        await interaction.response.send_message(
+            "❌ I could not create an invite. I need the **Create Instant Invite** permission in at least one text channel.",
+            ephemeral=True,
+        )
 
     # ---------- /help ----------
     @app_commands.command(name="help", description="List all commands the welcomer bot provides")
