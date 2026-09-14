@@ -88,6 +88,10 @@ def _category_defs(bot: commands.Bot) -> dict:
         "owner": (
             "👑", "Owner",
             f"`{m} admin add/remove/list @user` — bot-admin allowlist (owner grants/revokes)\n"
+            f"`{m} noprefix add/remove/list/status @user` — let a user run commands with zero prefix\n"
+            f"`{m} noprefix guild add/remove/list [guild_id]` — same, for an entire server\n"
+            f"`{m} premium add/remove/list/status @user` — mark a user premium (tracking only for now)\n"
+            f"`{m} premium guild add/remove/list [guild_id]` — same, for an entire server\n"
             f"`{m} reload <cog name>` — hot-reload a cog\n"
             f"`{m} slist` — list servers I'm in\n"
             f"`{m} dm @user <message>` — DM someone as me\n"
