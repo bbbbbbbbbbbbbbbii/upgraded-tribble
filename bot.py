@@ -51,6 +51,11 @@ EXTENSIONS = [
     "cogs.afk",
     "cogs.owner",
     "cogs.customization",
+    "cogs.automod",
+    "cogs.voice_admin",
+    "cogs.voicemaster",
+    "cogs.reactionroles",
+    "cogs.voicelog",
 ]
 
 

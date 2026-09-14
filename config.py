@@ -87,3 +87,28 @@ AUTOSETUP_DM_MESSAGE = (
 WELCOMER_CATEGORY_NAME = "Welcomer"
 WELCOME_CHANNEL_NAME = "welcome"
 LEAVE_CHANNEL_NAME = "leave-log"
+
+# ---- Neon/glow accent used for "setup"-style progress embeds (image 2 style) ----
+NEON_COLOR = 0x00F0FF
+
+# ---- Automod ----
+AUTOMOD_SPAM_MSG_LIMIT = 2       # 2 or more messages triggers spam protection...
+AUTOMOD_SPAM_WINDOW_SECONDS = 3  # ...inside this many seconds = spam
+AUTOMOD_DEFAULT_MUTE_SECONDS = 600  # 10 minutes
+# Matches "http(s)://...", bare "word.tld" domains (web.xyz, foo.com, a.gg/x),
+# and Discord invite links — all treated as a "link" for /automod antilink.
+LINK_REGEX = (
+    r"(?:https?://|www\.)\S+"
+    r"|(?:discord\.(?:gg|com/invite)|discordapp\.com/invite)/\S+"
+    r"|\b[a-zA-Z0-9-]{1,63}\.(?:com|net|org|xyz|gg|io|co|me|link|tk|ru|info|biz|club|shop|top|site|online|live|store|fun|icu|cc|ws|to|gl|cn|dev|app)\b(?:/\S*)?"
+)
+# Very rough Discord bot/user token shape: three dot-separated base64url-ish
+# segments, first segment 24-26 chars. Good enough to catch accidental leaks
+# without needing to be a perfect token validator.
+TOKEN_REGEX = r"[MNO][A-Za-z\d]{23,25}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,}"
+
+# ---- VoiceMaster (Join to Create) ----
+VOICEMASTER_CATEGORY_NAME = "Voice Channels"
+VOICEMASTER_JOIN_CHANNEL_NAME = "➕ Join to Create"
+VOICEMASTER_PANEL_CHANNEL_NAME = "voice-control"
+VOICEMASTER_DEFAULT_NAME_TEMPLATE = "{user}'s Channel"
