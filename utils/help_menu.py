@@ -18,7 +18,6 @@ def _category_defs(bot: commands.Bot) -> dict:
         ),
         "welcome": (
             "👋", "Welcome",
-            f"All of these also work as `{m} welcome <subcommand>`:\n"
             "`/welcome channel` — set welcome channel\n"
             "`/welcome toggle` — enable/disable\n"
             "`/welcome message` — set message text\n"
@@ -32,7 +31,6 @@ def _category_defs(bot: commands.Bot) -> dict:
         ),
         "leave": (
             "🚪", "Leave",
-            f"All of these also work as `{m} leave <subcommand>`:\n"
             "`/leave channel` — set leave channel\n"
             "`/leave toggle` — enable/disable\n"
             "`/leave message` — set message text\n"
@@ -45,46 +43,6 @@ def _category_defs(bot: commands.Bot) -> dict:
             f"`/autorole remove` or `{m} autorole remove @role` — remove a join role\n"
             f"`{m} autorole` — list join roles (anyone)\n"
             "`/autorole clear` — remove all",
-        ),
-        "automod": (
-            "🛡️", "Automod",
-            f"`/automod enable` or `{m} automod` — turn on anti-link, anti-spam, anti-token & anti-caps\n"
-            "`/automod disable` — turn everything off\n"
-            f"`/automod antilink|antispam|antitoken|anticaps <on/off>` (or `{m} automod antilink on`, etc.) — toggle individually\n"
-            f"`/automod capslength <n>` (or `{m} automod capslength <n>`) — ALL-CAPS word length that triggers anti-caps (default 5)\n"
-            f"`/automod mutetime <seconds>` (or `{m} automod mutetime <seconds>`) — set the timeout duration\n"
-            f"`/automod logchannel` (or `{m} automod logchannel #channel`) — where violations get logged\n"
-            "`/automod whitelist channel|role` — exempt a channel/role\n"
-            f"`/automod status` (or `{m} automod status`) — show current config (anyone)",
-        ),
-        "voice": (
-            "🔊", "Voice",
-            "`/voice kick/kickall`, `/voice mute/muteall`, `/voice unmute/unmuteall`\n"
-            "`/voice deafen/deafenall`, `/voice undeafen/undeafenall`\n"
-            "`/voice move/moveall`, `/voice pull/pullall`\n"
-            "`/voice lock/unlock`, `/voice private/unprivate`\n"
-            "`/vcban add/remove/list` — block someone from all voice channels\n"
-            "`/vcmod add/remove/list` — let others use `/voice` commands\n"
-            "`/vcrole add/remove/config` — auto-role while connected to a VC",
-        ),
-        "voicemaster": (
-            "🎚️", "VoiceMaster",
-            f"`/voicemaster setup` or `{m} voicemaster setup` — Join-to-Create temp channels + control panel\n"
-            "`/voicemaster nametemplate` — customize new channel names (use `{user}`)\n"
-            "`/voicemaster panel` — re-post the control panel\n"
-            "Panel buttons: Lock/Unlock, Hide/Unhide, Rename, Limit +/-, Permit/Reject, "
-            "Claim/Transfer, Disconnect, Mute/Unmute, Info (anyone in their own temp channel)",
-        ),
-        "reactionroles": (
-            "🔥", "ReactionRoles",
-            "`/reactionrole add` — react to a message to give/remove a role\n"
-            "`/reactionrole list` — show configured reaction roles (anyone)\n"
-            "`/reactionrole reset` — clear all of them",
-        ),
-        "voicelog": (
-            "📋", "Voice Logging",
-            "`/voicelog channel` — where join/leave/move logs are sent\n"
-            "`/voicelog toggle` — enable/disable logging",
         ),
         "music": (
             "🎵", "Music (mention-only, no slash)",
