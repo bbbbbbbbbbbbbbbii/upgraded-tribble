@@ -38,6 +38,9 @@ INTENTS = discord.Intents.default()
 INTENTS.members = True  # required for on_member_join / on_member_remove / autorole
 INTENTS.message_content = True  # required to read "@Bot ping" style mention-commands
 INTENTS.voice_states = True  # required for the music cog (join/play/24-7)
+# Note: default() already includes guilds/moderation/webhooks/integrations,
+# which is everything the antinuke cog's event listeners need — no extra
+# privileged intent required for it.
 
 EXTENSIONS = [
     "cogs.welcome",
@@ -51,11 +54,8 @@ EXTENSIONS = [
     "cogs.afk",
     "cogs.owner",
     "cogs.customization",
+    "cogs.antinuke",
     "cogs.automod",
-    "cogs.voice_admin",
-    "cogs.voicemaster",
-    "cogs.reactionroles",
-    "cogs.voicelog",
 ]
 
 

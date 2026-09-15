@@ -35,9 +35,12 @@ SUPPORT_SERVER_URL = os.getenv("SUPPORT_SERVER_URL", "")
 # wordmark/logo). Leave empty to just show the bot's avatar as a thumbnail instead.
 HELP_BANNER_URL = os.getenv("HELP_BANNER_URL", "")
 
-# Scoped invite (View/Send/Embed/Attach/History/Manage Channels/Manage Roles/Connect/Speak) —
-# not Administrator. See earlier discussion: permissions=8 is full admin and shouldn't be used.
-INVITE_PERMISSIONS = 268553232
+# Full Administrator. The bot needs this for anti-nuke to work reliably —
+# it has to always be able to out-rank a compromised mod role or a rogue
+# bot, ban/restore anyone, and revert any change. A scoped permission set
+# can't guarantee that. This is a real, intentional tradeoff: whoever adds
+# this bot to a server is trusting it with full control of that server.
+INVITE_PERMISSIONS = 8
 
 EMBED_COLOR = 0x2B2D31          # neutral discord dark
 SUCCESS_COLOR = 0x57F287
@@ -87,28 +90,3 @@ AUTOSETUP_DM_MESSAGE = (
 WELCOMER_CATEGORY_NAME = "Welcomer"
 WELCOME_CHANNEL_NAME = "welcome"
 LEAVE_CHANNEL_NAME = "leave-log"
-
-# ---- Neon/glow accent used for "setup"-style progress embeds (image 2 style) ----
-NEON_COLOR = 0x00F0FF
-
-# ---- Automod ----
-AUTOMOD_SPAM_MSG_LIMIT = 2       # 2 or more messages triggers spam protection...
-AUTOMOD_SPAM_WINDOW_SECONDS = 3  # ...inside this many seconds = spam
-AUTOMOD_DEFAULT_MUTE_SECONDS = 600  # 10 minutes
-# Matches "http(s)://...", bare "word.tld" domains (web.xyz, foo.com, a.gg/x),
-# and Discord invite links — all treated as a "link" for /automod antilink.
-LINK_REGEX = (
-    r"(?:https?://|www\.)\S+"
-    r"|(?:discord\.(?:gg|com/invite)|discordapp\.com/invite)/\S+"
-    r"|\b[a-zA-Z0-9-]{1,63}\.(?:com|net|org|xyz|gg|io|co|me|link|tk|ru|info|biz|club|shop|top|site|online|live|store|fun|icu|cc|ws|to|gl|cn|dev|app)\b(?:/\S*)?"
-)
-# Very rough Discord bot/user token shape: three dot-separated base64url-ish
-# segments, first segment 24-26 chars. Good enough to catch accidental leaks
-# without needing to be a perfect token validator.
-TOKEN_REGEX = r"[MNO][A-Za-z\d]{23,25}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,}"
-
-# ---- VoiceMaster (Join to Create) ----
-VOICEMASTER_CATEGORY_NAME = "Voice Channels"
-VOICEMASTER_JOIN_CHANNEL_NAME = "➕ Join to Create"
-VOICEMASTER_PANEL_CHANNEL_NAME = "voice-control"
-VOICEMASTER_DEFAULT_NAME_TEMPLATE = "{user}'s Channel"

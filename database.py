@@ -70,72 +70,72 @@ CREATE TABLE IF NOT EXISTS premium_guilds (
     added_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- ---------- Automod ----------
-CREATE TABLE IF NOT EXISTS automod_settings (
-    guild_id            INTEGER PRIMARY KEY,
-    antilink            INTEGER NOT NULL DEFAULT 0,
-    antispam            INTEGER NOT NULL DEFAULT 0,
-    antitoken           INTEGER NOT NULL DEFAULT 0,
-    anticaps            INTEGER NOT NULL DEFAULT 0,
-    anticaps_min_len    INTEGER NOT NULL DEFAULT 5,
-    mute_seconds        INTEGER NOT NULL DEFAULT 600,
-    log_channel_id      INTEGER,
-    whitelist_channel_ids TEXT NOT NULL DEFAULT '',
-    whitelist_role_ids  TEXT NOT NULL DEFAULT ''
+-- ---------- anti-nuke ----------
+CREATE TABLE IF NOT EXISTS antinuke_settings (
+    guild_id       INTEGER PRIMARY KEY,
+    enabled        INTEGER NOT NULL DEFAULT 0,
+    protections    TEXT NOT NULL DEFAULT '',   -- comma list of enabled protection keys
+    wall_role_id   INTEGER,
+    log_channel_id INTEGER,
+    punishment     TEXT NOT NULL DEFAULT 'ban' -- 'ban' or 'strip_roles'
 );
 
--- ---------- VoiceMaster (Join to Create) ----------
-CREATE TABLE IF NOT EXISTS voicemaster_settings (
-    guild_id        INTEGER PRIMARY KEY,
-    join_channel_id INTEGER,
-    category_id     INTEGER,
-    panel_channel_id  INTEGER,
-    panel_message_id  INTEGER,
-    name_template   TEXT NOT NULL DEFAULT '{user}''s Channel'
-);
-
-CREATE TABLE IF NOT EXISTS voicemaster_channels (
-    channel_id INTEGER PRIMARY KEY,
-    guild_id   INTEGER NOT NULL,
-    owner_id   INTEGER NOT NULL
-);
-
--- ---------- Reaction Roles ----------
-CREATE TABLE IF NOT EXISTS reaction_roles (
-    guild_id   INTEGER NOT NULL,
-    message_id INTEGER NOT NULL,
-    channel_id INTEGER NOT NULL,
-    emoji      TEXT NOT NULL,
-    role_id    INTEGER NOT NULL,
-    PRIMARY KEY (message_id, emoji)
-);
-
--- ---------- Voice join/leave logging ----------
-CREATE TABLE IF NOT EXISTS voicelog_settings (
-    guild_id   INTEGER PRIMARY KEY,
-    channel_id INTEGER,
-    enabled    INTEGER NOT NULL DEFAULT 0
-);
-
--- ---------- VC role (role auto-granted while connected to a specific VC) ----------
-CREATE TABLE IF NOT EXISTS vcrole_map (
-    guild_id   INTEGER NOT NULL,
-    channel_id INTEGER NOT NULL,
-    role_id    INTEGER NOT NULL,
-    PRIMARY KEY (guild_id, channel_id)
-);
-
--- ---------- Voice moderators (allowed to use /voice commands beyond Discord perms) ----------
-CREATE TABLE IF NOT EXISTS vcmods (
+CREATE TABLE IF NOT EXISTS antinuke_whitelist (
     guild_id INTEGER NOT NULL,
     user_id  INTEGER NOT NULL,
+    bypass   TEXT NOT NULL DEFAULT 'all',  -- 'all' or a comma list of protection keys
     PRIMARY KEY (guild_id, user_id)
 );
 
--- ---------- Voice bans (blocked from joining any voice channel) ----------
-CREATE TABLE IF NOT EXISTS vcbans (
+-- Lightweight structural snapshot used to restore channels/roles a nuker
+-- deletes. Refreshed on every relevant create/delete/update, so it's never
+-- more than one change stale.
+CREATE TABLE IF NOT EXISTS antinuke_snapshots (
+    guild_id     INTEGER PRIMARY KEY,
+    channels_json TEXT NOT NULL DEFAULT '[]',
+    roles_json    TEXT NOT NULL DEFAULT '[]',
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ---------- automod ----------
+CREATE TABLE IF NOT EXISTS automod_settings (
+    guild_id            INTEGER PRIMARY KEY,
+    log_channel_id      INTEGER,
+    mass_mention_limit  INTEGER NOT NULL DEFAULT 3,   -- distinct users pinged in one message
+    mass_mention_action TEXT NOT NULL DEFAULT 'mute',
+    mute_seconds        INTEGER NOT NULL DEFAULT 600, -- 10 min default timeout
+    ip_filter_enabled   INTEGER NOT NULL DEFAULT 1,
+    duplicate_limit     INTEGER NOT NULL DEFAULT 3,   -- repeats before action
+    duplicate_window    INTEGER NOT NULL DEFAULT 30   -- seconds
+);
+
+CREATE TABLE IF NOT EXISTS blacklist_words (
     guild_id INTEGER NOT NULL,
-    user_id  INTEGER NOT NULL,
+    word     TEXT NOT NULL,
+    PRIMARY KEY (guild_id, word)
+);
+
+-- ---------- moderation ----------
+CREATE TABLE IF NOT EXISTS warnings (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id  INTEGER NOT NULL,
+    user_id   INTEGER NOT NULL,
+    moderator_id INTEGER NOT NULL,
+    reason    TEXT NOT NULL DEFAULT 'No reason given',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS jail_settings (
+    guild_id      INTEGER PRIMARY KEY,
+    jail_role_id  INTEGER,
+    jail_channel_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS jailed_users (
+    guild_id     INTEGER NOT NULL,
+    user_id      INTEGER NOT NULL,
+    previous_roles TEXT NOT NULL DEFAULT '',
+    jailed_at    TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (guild_id, user_id)
 );
 """
@@ -362,219 +362,161 @@ class Database:
         cur = await self._conn.execute("SELECT 1 FROM premium_guilds WHERE guild_id = ?", (guild_id,))
         return (await cur.fetchone()) is not None
 
-    # ---------- Automod ----------
-    _AUTOMOD_DEFAULTS = {
-        "antilink": 0, "antispam": 0, "antitoken": 0, "mute_seconds": 600,
-        "log_channel_id": None, "whitelist_channel_ids": "", "whitelist_role_ids": "",
-    }
+    # ---------- anti-nuke ----------
+    async def get_antinuke(self, guild_id: int) -> dict:
+        await self._conn.execute(
+            "INSERT OR IGNORE INTO antinuke_settings (guild_id) VALUES (?)", (guild_id,)
+        )
+        await self._conn.commit()
+        cur = await self._conn.execute("SELECT * FROM antinuke_settings WHERE guild_id = ?", (guild_id,))
+        return dict(await cur.fetchone())
 
+    async def update_antinuke(self, guild_id: int, **fields):
+        await self.get_antinuke(guild_id)
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [guild_id]
+        await self._conn.execute(f"UPDATE antinuke_settings SET {cols} WHERE guild_id = ?", values)
+        await self._conn.commit()
+
+    @staticmethod
+    def protection_list(settings: dict) -> list[str]:
+        return [p for p in settings["protections"].split(",") if p]
+
+    async def add_whitelist(self, guild_id: int, user_id: int, bypass: str = "all"):
+        await self._conn.execute(
+            "INSERT INTO antinuke_whitelist (guild_id, user_id, bypass) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET bypass = excluded.bypass",
+            (guild_id, user_id, bypass),
+        )
+        await self._conn.commit()
+
+    async def remove_whitelist(self, guild_id: int, user_id: int):
+        await self._conn.execute(
+            "DELETE FROM antinuke_whitelist WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
+        )
+        await self._conn.commit()
+
+    async def list_whitelist(self, guild_id: int) -> list[dict]:
+        cur = await self._conn.execute(
+            "SELECT user_id, bypass FROM antinuke_whitelist WHERE guild_id = ?", (guild_id,)
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def is_whitelisted(self, guild_id: int, user_id: int, protection: str) -> bool:
+        cur = await self._conn.execute(
+            "SELECT bypass FROM antinuke_whitelist WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
+        )
+        row = await cur.fetchone()
+        if not row:
+            return False
+        if row["bypass"] == "all":
+            return True
+        return protection in row["bypass"].split(",")
+
+    async def save_snapshot(self, guild_id: int, channels_json: str, roles_json: str):
+        await self._conn.execute(
+            "INSERT INTO antinuke_snapshots (guild_id, channels_json, roles_json, updated_at) "
+            "VALUES (?, ?, ?, datetime('now')) "
+            "ON CONFLICT(guild_id) DO UPDATE SET channels_json=excluded.channels_json, "
+            "roles_json=excluded.roles_json, updated_at=excluded.updated_at",
+            (guild_id, channels_json, roles_json),
+        )
+        await self._conn.commit()
+
+    async def get_snapshot(self, guild_id: int) -> dict | None:
+        cur = await self._conn.execute(
+            "SELECT * FROM antinuke_snapshots WHERE guild_id = ?", (guild_id,)
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    # ---------- automod ----------
     async def get_automod(self, guild_id: int) -> dict:
         await self._conn.execute(
             "INSERT OR IGNORE INTO automod_settings (guild_id) VALUES (?)", (guild_id,)
         )
         await self._conn.commit()
         cur = await self._conn.execute("SELECT * FROM automod_settings WHERE guild_id = ?", (guild_id,))
-        row = await cur.fetchone()
-        return dict(row)
+        return dict(await cur.fetchone())
 
     async def update_automod(self, guild_id: int, **fields):
         await self.get_automod(guild_id)
-        if not fields:
-            return
         cols = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [guild_id]
         await self._conn.execute(f"UPDATE automod_settings SET {cols} WHERE guild_id = ?", values)
         await self._conn.commit()
 
-    @staticmethod
-    def automod_whitelisted_channels(settings: dict) -> list[int]:
-        return [int(c) for c in (settings.get("whitelist_channel_ids") or "").split(",") if c]
-
-    @staticmethod
-    def automod_whitelisted_roles(settings: dict) -> list[int]:
-        return [int(r) for r in (settings.get("whitelist_role_ids") or "").split(",") if r]
-
-    async def automod_add_whitelist_channel(self, guild_id: int, channel_id: int):
-        s = await self.get_automod(guild_id)
-        ids = self.automod_whitelisted_channels(s)
-        if channel_id not in ids:
-            ids.append(channel_id)
-        await self.update_automod(guild_id, whitelist_channel_ids=",".join(str(i) for i in ids))
-
-    async def automod_remove_whitelist_channel(self, guild_id: int, channel_id: int):
-        s = await self.get_automod(guild_id)
-        ids = [i for i in self.automod_whitelisted_channels(s) if i != channel_id]
-        await self.update_automod(guild_id, whitelist_channel_ids=",".join(str(i) for i in ids))
-
-    async def automod_add_whitelist_role(self, guild_id: int, role_id: int):
-        s = await self.get_automod(guild_id)
-        ids = self.automod_whitelisted_roles(s)
-        if role_id not in ids:
-            ids.append(role_id)
-        await self.update_automod(guild_id, whitelist_role_ids=",".join(str(i) for i in ids))
-
-    async def automod_remove_whitelist_role(self, guild_id: int, role_id: int):
-        s = await self.get_automod(guild_id)
-        ids = [i for i in self.automod_whitelisted_roles(s) if i != role_id]
-        await self.update_automod(guild_id, whitelist_role_ids=",".join(str(i) for i in ids))
-
-    # ---------- VoiceMaster ----------
-    async def get_voicemaster(self, guild_id: int) -> dict:
+    async def add_blacklist_word(self, guild_id: int, word: str):
         await self._conn.execute(
-            "INSERT OR IGNORE INTO voicemaster_settings (guild_id) VALUES (?)", (guild_id,)
+            "INSERT OR IGNORE INTO blacklist_words (guild_id, word) VALUES (?, ?)", (guild_id, word.lower())
         )
         await self._conn.commit()
-        cur = await self._conn.execute("SELECT * FROM voicemaster_settings WHERE guild_id = ?", (guild_id,))
+
+    async def remove_blacklist_word(self, guild_id: int, word: str):
+        await self._conn.execute(
+            "DELETE FROM blacklist_words WHERE guild_id = ? AND word = ?", (guild_id, word.lower())
+        )
+        await self._conn.commit()
+
+    async def list_blacklist_words(self, guild_id: int) -> list[str]:
+        cur = await self._conn.execute("SELECT word FROM blacklist_words WHERE guild_id = ?", (guild_id,))
+        return [r["word"] for r in await cur.fetchall()]
+
+    # ---------- moderation: warnings ----------
+    async def add_warning(self, guild_id: int, user_id: int, moderator_id: int, reason: str):
+        await self._conn.execute(
+            "INSERT INTO warnings (guild_id, user_id, moderator_id, reason) VALUES (?, ?, ?, ?)",
+            (guild_id, user_id, moderator_id, reason),
+        )
+        await self._conn.commit()
+
+    async def list_warnings(self, guild_id: int, user_id: int) -> list[dict]:
+        cur = await self._conn.execute(
+            "SELECT * FROM warnings WHERE guild_id = ? AND user_id = ? ORDER BY created_at", (guild_id, user_id)
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def clear_warnings(self, guild_id: int, user_id: int):
+        await self._conn.execute("DELETE FROM warnings WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+        await self._conn.commit()
+
+    # ---------- moderation: jail ----------
+    async def get_jail_settings(self, guild_id: int) -> dict:
+        await self._conn.execute("INSERT OR IGNORE INTO jail_settings (guild_id) VALUES (?)", (guild_id,))
+        await self._conn.commit()
+        cur = await self._conn.execute("SELECT * FROM jail_settings WHERE guild_id = ?", (guild_id,))
         return dict(await cur.fetchone())
 
-    async def update_voicemaster(self, guild_id: int, **fields):
-        await self.get_voicemaster(guild_id)
-        if not fields:
-            return
+    async def update_jail_settings(self, guild_id: int, **fields):
+        await self.get_jail_settings(guild_id)
         cols = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values()) + [guild_id]
-        await self._conn.execute(f"UPDATE voicemaster_settings SET {cols} WHERE guild_id = ?", values)
+        await self._conn.execute(f"UPDATE jail_settings SET {cols} WHERE guild_id = ?", values)
         await self._conn.commit()
 
-    async def add_voicemaster_channel(self, channel_id: int, guild_id: int, owner_id: int):
+    async def set_jailed(self, guild_id: int, user_id: int, previous_roles: str):
         await self._conn.execute(
-            "INSERT OR REPLACE INTO voicemaster_channels (channel_id, guild_id, owner_id) VALUES (?, ?, ?)",
-            (channel_id, guild_id, owner_id),
+            "INSERT INTO jailed_users (guild_id, user_id, previous_roles) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET previous_roles = excluded.previous_roles",
+            (guild_id, user_id, previous_roles),
         )
         await self._conn.commit()
 
-    async def remove_voicemaster_channel(self, channel_id: int):
-        await self._conn.execute("DELETE FROM voicemaster_channels WHERE channel_id = ?", (channel_id,))
-        await self._conn.commit()
-
-    async def get_voicemaster_channel(self, channel_id: int) -> dict | None:
+    async def get_jailed(self, guild_id: int, user_id: int) -> dict | None:
         cur = await self._conn.execute(
-            "SELECT * FROM voicemaster_channels WHERE channel_id = ?", (channel_id,)
+            "SELECT * FROM jailed_users WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
         )
         row = await cur.fetchone()
         return dict(row) if row else None
 
-    async def set_voicemaster_owner(self, channel_id: int, owner_id: int):
+    async def clear_jailed(self, guild_id: int, user_id: int):
         await self._conn.execute(
-            "UPDATE voicemaster_channels SET owner_id = ? WHERE channel_id = ?", (owner_id, channel_id)
+            "DELETE FROM jailed_users WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
         )
         await self._conn.commit()
 
-    async def all_voicemaster_channels(self, guild_id: int) -> list[dict]:
-        cur = await self._conn.execute(
-            "SELECT * FROM voicemaster_channels WHERE guild_id = ?", (guild_id,)
-        )
-        return [dict(r) for r in await cur.fetchall()]
-
-    # ---------- Reaction roles ----------
-    async def add_reaction_role(self, guild_id: int, message_id: int, channel_id: int, emoji: str, role_id: int):
-        await self._conn.execute(
-            "INSERT OR REPLACE INTO reaction_roles (guild_id, message_id, channel_id, emoji, role_id) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (guild_id, message_id, channel_id, emoji, role_id),
-        )
-        await self._conn.commit()
-
-    async def get_reaction_role(self, message_id: int, emoji: str) -> dict | None:
-        cur = await self._conn.execute(
-            "SELECT * FROM reaction_roles WHERE message_id = ? AND emoji = ?", (message_id, emoji)
-        )
-        row = await cur.fetchone()
-        return dict(row) if row else None
-
-    async def list_reaction_roles(self, guild_id: int) -> list[dict]:
-        cur = await self._conn.execute("SELECT * FROM reaction_roles WHERE guild_id = ?", (guild_id,))
-        return [dict(r) for r in await cur.fetchall()]
-
-    async def reset_reaction_roles(self, guild_id: int):
-        await self._conn.execute("DELETE FROM reaction_roles WHERE guild_id = ?", (guild_id,))
-        await self._conn.commit()
-
-    async def remove_reaction_role(self, message_id: int, emoji: str):
-        await self._conn.execute(
-            "DELETE FROM reaction_roles WHERE message_id = ? AND emoji = ?", (message_id, emoji)
-        )
-        await self._conn.commit()
-
-    # ---------- Voice join/leave logging ----------
-    async def get_voicelog(self, guild_id: int) -> dict:
-        await self._conn.execute(
-            "INSERT OR IGNORE INTO voicelog_settings (guild_id) VALUES (?)", (guild_id,)
-        )
-        await self._conn.commit()
-        cur = await self._conn.execute("SELECT * FROM voicelog_settings WHERE guild_id = ?", (guild_id,))
-        return dict(await cur.fetchone())
-
-    async def update_voicelog(self, guild_id: int, **fields):
-        await self.get_voicelog(guild_id)
-        if not fields:
-            return
-        cols = ", ".join(f"{k} = ?" for k in fields)
-        values = list(fields.values()) + [guild_id]
-        await self._conn.execute(f"UPDATE voicelog_settings SET {cols} WHERE guild_id = ?", values)
-        await self._conn.commit()
-
-    # ---------- VC roles (auto-granted while connected to a given VC) ----------
-    async def set_vcrole(self, guild_id: int, channel_id: int, role_id: int):
-        await self._conn.execute(
-            "INSERT OR REPLACE INTO vcrole_map (guild_id, channel_id, role_id) VALUES (?, ?, ?)",
-            (guild_id, channel_id, role_id),
-        )
-        await self._conn.commit()
-
-    async def remove_vcrole(self, guild_id: int, channel_id: int):
-        await self._conn.execute(
-            "DELETE FROM vcrole_map WHERE guild_id = ? AND channel_id = ?", (guild_id, channel_id)
-        )
-        await self._conn.commit()
-
-    async def get_vcrole(self, guild_id: int, channel_id: int) -> int | None:
-        cur = await self._conn.execute(
-            "SELECT role_id FROM vcrole_map WHERE guild_id = ? AND channel_id = ?", (guild_id, channel_id)
-        )
-        row = await cur.fetchone()
-        return row["role_id"] if row else None
-
-    async def list_vcroles(self, guild_id: int) -> list[dict]:
-        cur = await self._conn.execute("SELECT * FROM vcrole_map WHERE guild_id = ?", (guild_id,))
-        return [dict(r) for r in await cur.fetchall()]
-
-    # ---------- Voice moderators ----------
-    async def add_vcmod(self, guild_id: int, user_id: int):
-        await self._conn.execute("INSERT OR IGNORE INTO vcmods (guild_id, user_id) VALUES (?, ?)", (guild_id, user_id))
-        await self._conn.commit()
-
-    async def remove_vcmod(self, guild_id: int, user_id: int):
-        await self._conn.execute("DELETE FROM vcmods WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
-        await self._conn.commit()
-
-    async def is_vcmod(self, guild_id: int, user_id: int) -> bool:
-        cur = await self._conn.execute(
-            "SELECT 1 FROM vcmods WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
-        )
-        return (await cur.fetchone()) is not None
-
-    async def list_vcmods(self, guild_id: int) -> list[int]:
-        cur = await self._conn.execute("SELECT user_id FROM vcmods WHERE guild_id = ?", (guild_id,))
-        return [r["user_id"] for r in await cur.fetchall()]
-
-    # ---------- Voice bans ----------
-    async def add_vcban(self, guild_id: int, user_id: int):
-        await self._conn.execute("INSERT OR IGNORE INTO vcbans (guild_id, user_id) VALUES (?, ?)", (guild_id, user_id))
-        await self._conn.commit()
-
-    async def remove_vcban(self, guild_id: int, user_id: int):
-        await self._conn.execute("DELETE FROM vcbans WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
-        await self._conn.commit()
-
-    async def is_vcbanned(self, guild_id: int, user_id: int) -> bool:
-        cur = await self._conn.execute(
-            "SELECT 1 FROM vcbans WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)
-        )
-        return (await cur.fetchone()) is not None
-
-    async def list_vcbans(self, guild_id: int) -> list[int]:
-        cur = await self._conn.execute("SELECT user_id FROM vcbans WHERE guild_id = ?", (guild_id,))
+    async def list_jailed(self, guild_id: int) -> list[int]:
+        cur = await self._conn.execute("SELECT user_id FROM jailed_users WHERE guild_id = ?", (guild_id,))
         return [r["user_id"] for r in await cur.fetchall()]
 
 
