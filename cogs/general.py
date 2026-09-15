@@ -1,6 +1,4 @@
-
 import time
-import psutil
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -113,31 +111,11 @@ async def run_ping_measurement(bot: commands.Bot, guild_id: int, api_probe) -> d
 
     total_ms = ws_latency_ms + api_latency_ms + db_latency_ms
 
-    # VPS / bot process statistics
-    cpu_percent = psutil.cpu_percent()
-    memory = psutil.virtual_memory()
-    ram_used_gb = memory.used / (1024 ** 3)
-    ram_total_gb = memory.total / (1024 ** 3)
-
-    process = psutil.Process()
-    bot_ram_mb = process.memory_info().rss / (1024 ** 2)
-
     embed = brand_embed(bot, title="🏓 Pong!", color=EMBED_COLOR)
-
-    # Discord latency
-    embed.add_field(name="🔌 WebSocket", value=f"`{ws_latency_ms:.2f}ms`", inline=True)
-    embed.add_field(name="🌐 Discord API", value=f"`{api_latency_ms:.2f}ms`", inline=True)
-    embed.add_field(name="🗄️ Database", value=f"`{db_latency_ms:.2f}ms`", inline=True)
-
-    # VPS statistics
-    embed.add_field(name="💻 VPS CPU", value=f"`{cpu_percent:.1f}%`", inline=True)
-    embed.add_field(name="🧠 VPS RAM", value=f"`{ram_used_gb:.2f} GB / {ram_total_gb:.2f} GB`", inline=True)
-    embed.add_field(name="🤖 Bot RAM", value=f"`{bot_ram_mb:.1f} MB`", inline=True)
-
-    # Database information
-    embed.add_field(name="📦 Database Type", value="`SQLite`", inline=True)
-    embed.add_field(name="⏱️ Total Latency", value=f"`{total_ms:.2f}ms`", inline=True)
-
+    embed.add_field(name="🔌 Websocket", value=f"`{ws_latency_ms:.5f}ms`", inline=True)
+    embed.add_field(name="🌐 Discord API", value=f"`{api_latency_ms:.5f}ms`", inline=True)
+    embed.add_field(name="🗄️ Database", value=f"`{db_latency_ms:.5f}ms`", inline=True)
+    embed.add_field(name="⏱️ Total", value=f"`{total_ms:.5f}ms`", inline=False)
     return embed
 
 
@@ -240,60 +218,6 @@ class General(commands.Cog):
 
         embed = await run_ping_measurement(self.bot, interaction.guild_id, api_probe)
         await interaction.edit_original_response(embed=embed)
-
-    # ---------- /invite ----------
-    @app_commands.command(name="invite", description="Create a server invite and send it to the bot developer via DM")
-    @app_commands.describe(server_id="The Discord server ID")
-    async def invite(self, interaction: discord.Interaction, server_id: str):
-        app_info = await self.bot.application_info()
-
-        if interaction.user.id != app_info.owner.id:
-            await interaction.response.send_message(
-                "❌ Only the bot developer can use this command.",
-                ephemeral=True,
-            )
-            return
-
-        try:
-            guild_id = int(server_id)
-        except ValueError:
-            await interaction.response.send_message("❌ Invalid server ID.", ephemeral=True)
-            return
-
-        guild = self.bot.get_guild(guild_id)
-        if guild is None:
-            await interaction.response.send_message("❌ I am not in that server.", ephemeral=True)
-            return
-
-        me = guild.me or guild.get_member(self.bot.user.id)
-
-        for channel in guild.text_channels:
-            if not channel.permissions_for(me).create_instant_invite:
-                continue
-            try:
-                invite = await channel.create_invite(
-                    max_age=0,
-                    max_uses=0,
-                    unique=True,
-                    reason=f"Server invite requested by bot developer {interaction.user}",
-                )
-                await interaction.user.send(
-                    f"🔗 **Server:** {guild.name}\n"
-                    f"🆔 **Server ID:** `{guild.id}`\n"
-                    f"📨 **Invite:** {invite.url}"
-                )
-                await interaction.response.send_message(
-                    "✅ Server invite link sent to your DM.",
-                    ephemeral=True,
-                )
-                return
-            except (discord.Forbidden, discord.HTTPException):
-                continue
-
-        await interaction.response.send_message(
-            "❌ I could not create an invite. I need the **Create Instant Invite** permission in at least one text channel.",
-            ephemeral=True,
-        )
 
     # ---------- /help ----------
     @app_commands.command(name="help", description="List all commands the welcomer bot provides")

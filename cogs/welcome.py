@@ -1,4 +1,3 @@
-import logging
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -16,8 +15,6 @@ from utils.placeholders import render
 from utils.image_gen import generate_card
 from utils.embeds import brand_embed
 
-log = logging.getLogger("welcomer")
-
 
 class Welcome(commands.Cog):
     """Handles new-member welcomes: channel message, image card, DM, and autorole."""
@@ -28,81 +25,61 @@ class Welcome(commands.Cog):
     # ---------- event ----------
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
-        # Wrapped in a broad try/except + logging: previously a bad channel
-        # (deleted / missing perms / any other Discord error) would fail
-        # silently here with no trace of why the welcome message never sent.
-        try:
-            settings = await db.get_settings(member.guild.id)
-            await db.increment(member.guild.id, "total_joins")
+        settings = await db.get_settings(member.guild.id)
+        await db.increment(member.guild.id, "total_joins")
 
-            # autorole
-            role_ids = db.role_ids(settings)
-            if role_ids:
-                roles = [member.guild.get_role(rid) for rid in role_ids]
-                roles = [r for r in roles if r is not None]
-                if roles:
-                    try:
-                        await member.add_roles(*roles, reason="Autorole on join")
-                    except discord.Forbidden:
-                        pass
-
-            # channel welcome
-            if settings["welcome_enabled"] and not settings["welcome_channel_id"]:
-                log.warning("Welcome is enabled for guild %s but no welcome_channel_id is set.", member.guild.id)
-            if settings["welcome_enabled"] and settings["welcome_channel_id"]:
-                channel = member.guild.get_channel(settings["welcome_channel_id"])
-                if channel is None:
-                    log.warning(
-                        "Welcome channel %s configured for guild %s no longer exists — "
-                        "run /welcome channel again to fix this.",
-                        settings["welcome_channel_id"], member.guild.id,
-                    )
-                if channel:
-                    text = render(settings["welcome_message"], member)
-                    color = settings["embed_color"] or EMBED_COLOR
-                    file = None
-                    embed = brand_embed(
-                        self.bot, description=text, color=color,
-                        footer=f"Member #{member.guild.member_count}",
-                    )
-
-                    if settings["welcome_card"]:
-                        try:
-                            buf = await generate_card(
-                                username=member.display_name,
-                                subtitle=f"Member #{member.guild.member_count} of {member.guild.name}",
-                                avatar_url=member.display_avatar.replace(size=256).url,
-                                background_url=settings["welcome_bg_url"],
-                                accent_rgb=_hex_to_rgb(color),
-                            )
-                            file = discord.File(buf, filename="welcome.png")
-                            embed.set_image(url="attachment://welcome.png")
-                        except Exception:
-                            file = None
-
-                    try:
-                        if file:
-                            await channel.send(content=member.mention, embed=embed, file=file)
-                        else:
-                            await channel.send(content=member.mention, embed=embed)
-                    except discord.Forbidden:
-                        log.warning(
-                            "Missing permission to send the welcome message in #%s (guild %s) — "
-                            "check I have View Channel + Send Messages + Embed Links there.",
-                            channel.name, member.guild.id,
-                        )
-                    except discord.HTTPException:
-                        log.exception("Failed to send welcome message in guild %s", member.guild.id)
-
-            # DM welcome
-            if settings["dm_enabled"]:
+        # autorole
+        role_ids = db.role_ids(settings)
+        if role_ids:
+            roles = [member.guild.get_role(rid) for rid in role_ids]
+            roles = [r for r in roles if r is not None]
+            if roles:
                 try:
-                    dm_text = render(settings["dm_message"], member)
-                    await member.send(dm_text)
-                except (discord.Forbidden, discord.HTTPException):
+                    await member.add_roles(*roles, reason="Autorole on join")
+                except discord.Forbidden:
                     pass
-        except Exception:
-            log.exception("Unhandled error in on_member_join for guild %s", member.guild.id)
+
+        # channel welcome
+        if settings["welcome_enabled"] and settings["welcome_channel_id"]:
+            channel = member.guild.get_channel(settings["welcome_channel_id"])
+            if channel:
+                text = render(settings["welcome_message"], member)
+                color = settings["embed_color"] or EMBED_COLOR
+                file = None
+                embed = brand_embed(
+                    self.bot, description=text, color=color,
+                    footer=f"Member #{member.guild.member_count}",
+                )
+
+                if settings["welcome_card"]:
+                    try:
+                        buf = await generate_card(
+                            username=member.display_name,
+                            subtitle=f"Member #{member.guild.member_count} of {member.guild.name}",
+                            avatar_url=member.display_avatar.replace(size=256).url,
+                            background_url=settings["welcome_bg_url"],
+                            accent_rgb=_hex_to_rgb(color),
+                        )
+                        file = discord.File(buf, filename="welcome.png")
+                        embed.set_image(url="attachment://welcome.png")
+                    except Exception:
+                        file = None
+
+                try:
+                    if file:
+                        await channel.send(content=member.mention, embed=embed, file=file)
+                    else:
+                        await channel.send(content=member.mention, embed=embed)
+                except discord.Forbidden:
+                    pass
+
+        # DM welcome
+        if settings["dm_enabled"]:
+            try:
+                dm_text = render(settings["dm_message"], member)
+                await member.send(dm_text)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
     # ---------- command group ----------
     welcome_group = app_commands.Group(name="welcome", description="Configure welcome messages")

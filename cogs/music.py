@@ -18,6 +18,7 @@ import random
 
 import discord
 from discord.ext import commands
+from discord.http import Route
 import wavelink
 
 from config import SUCCESS_COLOR, ERROR_COLOR, EMBED_COLOR
@@ -26,7 +27,29 @@ from utils.embeds import brand_embed, loading_embed
 
 log = logging.getLogger("welcomer.music")
 
-IDLE_DISCONNECT_SECONDS = 180
+# Effectively "never auto-leave from idling" — requested explicitly. 24/7 mode
+# already skips this timer entirely; this just makes the non-24/7 default
+# very long too, rather than the previous 3-minute idle disconnect.
+IDLE_DISCONNECT_SECONDS = 99999999
+
+
+async def set_voice_status(bot: commands.Bot, channel_id: int, status: str):
+    """
+    Sets the little text under a voice channel's name in the channel list
+    (the same feature you see in the Discord client, added mid-2024).
+    discord.py doesn't wrap this everywhere across versions, so it's called
+    directly via the real endpoint: PUT /channels/{id}/voice-status.
+    Requires the "Set Voice Channel Status" permission (included in
+    Administrator, which this bot already needs for anti-nuke).
+    Silently no-ops on failure — a missing status is cosmetic, never worth
+    erroring the whole music flow over.
+    """
+    status = (status or "")[:480]  # Discord's cap is 500 chars; leave headroom
+    try:
+        route = Route("PUT", "/channels/{channel_id}/voice-status", channel_id=channel_id)
+        await bot.http.request(route, json={"status": status})
+    except Exception:
+        log.debug("Couldn't set voice channel status on %s", channel_id, exc_info=True)
 
 # Lavalink-native filters (applied server-side, no restart-from-0 needed —
 # unlike the old ffmpeg approach, Lavalink re-applies filters live).
@@ -264,6 +287,7 @@ class Music(commands.Cog, name="Music"):
                 continue
             try:
                 await channel.connect(cls=discord.VoiceClient, self_deaf=True)
+                await set_voice_status(self.bot, channel.id, "😌 Chilling")
                 log.info("Rejoined 24/7 channel #%s in guild %s (voice-only, Lavalink down)", channel.name, guild.name)
             except Exception:
                 log.exception("Failed to voice-only-rejoin 24/7 channel in guild %s", guild.id)
@@ -330,10 +354,15 @@ class Music(commands.Cog, name="Music"):
                 return None
             if isinstance(player, LavalinkPlayer):
                 player.autoplay = wavelink.AutoPlayMode.partial
+            await set_voice_status(self.bot, player.channel.id, "😌 Chilling")
         else:
             player = existing
             if player.channel.id != ctx.author.voice.channel.id:
+                old_channel_id = player.channel.id
                 await player.move_to(ctx.author.voice.channel)
+                await set_voice_status(self.bot, old_channel_id, "")
+                if isinstance(player, LavalinkPlayer) and not player.playing:
+                    await set_voice_status(self.bot, player.channel.id, "😌 Chilling")
 
         if isinstance(player, LavalinkPlayer):
             player.text_channel = ctx.channel
@@ -381,6 +410,7 @@ class Music(commands.Cog, name="Music"):
                 player: LavalinkPlayer = await channel.connect(cls=LavalinkPlayer, self_deaf=True)
                 player.autoplay = wavelink.AutoPlayMode.partial
                 player.stay_247 = True
+                await set_voice_status(self.bot, channel.id, "😌 Chilling")
                 log.info("Rejoined 24/7 channel #%s in guild %s (now with music)", channel.name, guild.name)
             except Exception:
                 log.exception("Failed to rejoin 24/7 channel in guild %s", guild.id)
@@ -388,7 +418,12 @@ class Music(commands.Cog, name="Music"):
     @commands.Cog.listener()
     async def on_wavelink_track_start(self, payload: wavelink.TrackStartEventPayload):
         player: LavalinkPlayer = payload.player
-        if not player or not isinstance(player, LavalinkPlayer) or not player.text_channel:
+        if not player or not isinstance(player, LavalinkPlayer):
+            return
+        track = payload.track
+        status = f"🎵 Playing: {track.author} - {track.title}" if track.author else f"🎵 Playing: {track.title}"
+        await set_voice_status(self.bot, player.channel.id, status)
+        if not player.text_channel:
             return
         view = MusicControls(self, player)
         embed = build_now_playing_embed(self.bot, player)
@@ -403,6 +438,7 @@ class Music(commands.Cog, name="Music"):
         if not player or not isinstance(player, LavalinkPlayer):
             return
         if not player.playing and player.queue.is_empty:
+            await set_voice_status(self.bot, player.channel.id, "😌 Chilling")
             player.start_idle_timer()
 
     # ---------- join / leave ----------
@@ -417,11 +453,13 @@ class Music(commands.Cog, name="Music"):
     async def leave(self, ctx: commands.Context):
         vc = ctx.voice_client
         if vc:
+            channel_id = vc.channel.id
             if isinstance(vc, LavalinkPlayer):
                 vc.cancel_idle_timer()
                 vc.queue.clear()
             await db.update(ctx.guild.id, stay_247=0)
             await vc.disconnect(force=True)
+            await set_voice_status(self.bot, channel_id, "")
         await ctx.reply(embed=brand_embed(self.bot, description="👋 Left the voice channel.", color=SUCCESS_COLOR), mention_author=False)
 
     # ---------- play ----------
